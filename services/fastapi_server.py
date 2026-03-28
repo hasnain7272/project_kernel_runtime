@@ -72,6 +72,163 @@ from project_kernel_runtime.services.router_mcp import router as mcp_router
 app.include_router(agent_router)
 app.include_router(mcp_router)
 
+# 2. UI WebSocket for Dynamic Control Panel
+@app.websocket("/ws/ui")
+async def websocket_ui(websocket: WebSocket):
+    """WebSocket endpoint for real-time UI control panel."""
+    from project_kernel_runtime.services.ui_websocket import get_ui_websocket_handler
+    import uuid
+    await websocket.accept()
+    client_id = str(uuid.uuid4())
+    handler = get_ui_websocket_handler()
+    await handler.handle_connection(websocket, client_id)
+
+# 3. API endpoint to get UI schema (standalone, no kernel deps)
+@app.get("/api/ui-schema")
+async def get_ui_schema():
+    """Get UI schema for dynamic control panel."""
+    import yaml
+    from pathlib import Path
+    
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    if not config_path.exists():
+        return {"error": "runtime.yaml not found", "categories": [], "total_parameters": 0}
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    
+    # Flatten nested config to parameters
+    params = []
+    categories_set = set()
+    
+    def flatten(d, prefix=""):
+        for k, v in d.items():
+            param_id = f"{prefix}{k}" if prefix else k
+            if isinstance(v, dict):
+                flatten(v, f"{param_id}.")
+            elif v is not None:
+                param_type = "boolean" if isinstance(v, bool) else "slider" if isinstance(v, (int, float)) else "text"
+                categories_set.add(prefix.rstrip(".").split(".")[0] if prefix else "general")
+                params.append({
+                    "id": param_id,
+                    "type": param_type,
+                    "label": k.replace("_", " ").title(),
+                    "description": f"Configuration: {param_id}",
+                    "category": prefix.rstrip(".").split(".")[0] if prefix else "general",
+                    "default": v,
+                    "value": v
+                })
+    
+    flatten(config)
+    
+    # Build categories
+    category_info = {
+        "llm": {"label": "LLM & Models", "icon": "brain"},
+        "sandbox": {"label": "Sandbox & Execution", "icon": "box"},
+        "governance": {"label": "Governance & Security", "icon": "shield"},
+        "mcp": {"label": "MCP Protocol", "icon": "link"},
+        "a2a": {"label": "A2A Mesh", "icon": "share"},
+        "observability": {"label": "Observability", "icon": "activity"},
+        "server": {"label": "Server", "icon": "server"},
+        "features": {"label": "Feature Flags", "icon": "toggle"},
+        "vector_db": {"label": "Memory & RAG", "icon": "database"},
+    }
+    
+    categories = []
+    for cat_id in categories_set:
+        cat_params = [p for p in params if p["category"] == cat_id]
+        info = category_info.get(cat_id, {"label": cat_id.title(), "icon": "settings"})
+        categories.append({
+            "id": cat_id,
+            "label": info["label"],
+            "description": f"{info['label']} settings",
+            "icon": info["icon"],
+            "order": len(categories),
+            "parameters": cat_params
+        })
+    
+    return {
+        "version": "1.0.0",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "categories": categories,
+        "total_parameters": len(params)
+    }
+
+# 4. API endpoint to get/set parameters (standalone)
+@app.get("/api/params")
+async def get_all_params():
+    """Get all parameters."""
+    import yaml
+    from pathlib import Path
+    
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    if not config_path.exists():
+        return {}
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    
+    def flatten(d, prefix=""):
+        result = {}
+        for k, v in d.items():
+            param_id = f"{prefix}{k}" if prefix else k
+            if isinstance(v, dict):
+                result.update(flatten(v, f"{param_id}."))
+            else:
+                result[param_id] = v
+        return result
+    
+    return flatten(config)
+
+@app.get("/api/params/{param_id}")
+async def get_param(param_id: str):
+    """Get a single parameter."""
+    import yaml
+    from pathlib import Path
+    
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    if not config_path.exists():
+        raise HTTPException(status_code=404, detail="Config not found")
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    
+    parts = param_id.split(".")
+    value = config
+    for part in parts:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            raise HTTPException(status_code=404, detail="Parameter not found")
+    
+    return {"param_id": param_id, "value": value}
+
+@app.put("/api/params/{param_id}")
+async def set_param(param_id: str, value: Any):
+    """Set a parameter value."""
+    import yaml
+    from pathlib import Path
+    
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    if not config_path.exists():
+        raise HTTPException(status_code=500, detail="Config not found")
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    
+    parts = param_id.split(".")
+    target = config
+    for part in parts[:-1]:
+        if part not in target:
+            target[part] = {}
+        target = target[part]
+    target[parts[-1]] = value
+    
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+    
+    return {"success": True, "param_id": param_id, "value": value}
+
 # 2. Static Dashboard
 ui_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "ui", "web"))
 if os.path.exists(ui_dir):
@@ -81,12 +238,17 @@ else:
     print(f"ERROR: UI dir missing at {ui_dir}")
 
 @app.get("/")
-
 @app.get("/ui")
-
+@app.get("/ui/")
 async def root_redirect():
+    return RedirectResponse(url="/ui/index.html")
 
-    return RedirectResponse(url="/ui/spatial_ui.html")
+@app.get("/ui/index.html")
+async def serve_index():
+    """Serve the main Mission Control UI."""
+    from fastapi.responses import FileResponse
+    ui_index = os.path.join(ui_dir, "index.html")
+    return FileResponse(ui_index)
 
 # WebSocket connections
 

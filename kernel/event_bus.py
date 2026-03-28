@@ -87,6 +87,29 @@ class EventTypes:
     SYSTEM_HEALTH_CHECK = "system.health_check"
     SYSTEM_ERROR = "system.error"
 
+    # UI Events (for real-time UI updates)
+    UI_CONNECTED = "ui.connected"
+    UI_DISCONNECTED = "ui.disconnected"
+    UI_PARAM_CHANGED = "ui.param_changed"
+    UI_SUBSCRIPTION = "ui.subscription"
+    UI_STATUS_REQUEST = "ui.status_request"
+    
+    # Reasoning Stream (for ReAct visualization)
+    REASONING_START = "reasoning.start"
+    REASONING_STEP = "reasoning.step"
+    REASONING_COMPLETE = "reasoning.complete"
+    
+    # Agent Activity
+    AGENT_SPAWN = "agent.spawn"
+    AGENT_COMPLETE = "agent.complete"
+    AGENT_FAILED = "agent.failed"
+    
+    # Resource Metrics
+    METRIC_CPU = "metric.cpu"
+    METRIC_MEMORY = "metric.memory"
+    METRIC_TOKEN = "metric.token"
+    METRIC_LATENCY = "metric.latency"
+
 
 # ============================================================================
 # Event Bus
