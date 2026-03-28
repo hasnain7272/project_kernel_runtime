@@ -349,6 +349,7 @@ class Orchestrator:
 
         iteration = 0
         results = []
+        consecutive_tool_failures = 0
 
         while iteration < max_iterations:
             iteration += 1
@@ -369,6 +370,9 @@ class Orchestrator:
                     tool_calls=response.tool_calls,
                 ))
 
+                valid_tools_this_iteration = False
+                iteration_success = True
+
                 for tool_call in response.tool_calls:
                     func = tool_call.get("function", {})
                     tool_name = func.get("name", "").strip()
@@ -378,6 +382,7 @@ class Orchestrator:
                         logger.warning(f"[Orchestrator] Skipping empty tool name in tool_call: {tool_call}")
                         continue
                     
+                    valid_tools_this_iteration = True
                     import json
                     try:
                         raw_args = func.get("arguments", "{}")
@@ -397,6 +402,9 @@ class Orchestrator:
                     result_dict = {"tool_call_id": result.tool_call_id, "tool_name": result.tool_name, "success": result.success, "output": result.output, "error": result.error}
                     results.append({"tool": tool_name, "result": result_dict})
 
+                    if not result.success:
+                        iteration_success = False
+
                     # Feed result back to conversation
                     conversation.append(LLMMessage(
                         role="tool",
@@ -405,19 +413,44 @@ class Orchestrator:
                         name=tool_name,
                     ))
 
-                # If tool_calls existed but ALL were skipped (empty names),
-                # treat as text response and return content
-                valid_tool_calls = [r for r in results if r.get("tool")]
-                if not valid_tool_calls and response.content:
-                    task.status = "completed"
+                if not iteration_success:
+                    consecutive_tool_failures += 1
+                else:
+                    consecutive_tool_failures = 0
+
+                if consecutive_tool_failures >= 3:
+                    logger.warning("[Orchestrator] Too many consecutive tool failures. Forcing exit.")
+                    task.status = "failed"
                     self.tasks.save_task(task)
                     return {
                         "task_id": task.id,
-                        "response": response.content,
-                        "tool_results": [],
+                        "response": "Error: The agent got stuck failing to use tools correctly after 3 attempts.",
+                        "tool_results": results,
                         "iterations": iteration,
                         "usage": self.llm.get_usage_stats(),
                     }
+
+                # If tool_calls existed but ALL were skipped (empty names),
+                # treat as text response and return content
+                if not valid_tools_this_iteration:
+                    if response.content:
+                        task.status = "completed"
+                        self.tasks.save_task(task)
+                        return {
+                            "task_id": task.id,
+                            "response": response.content,
+                            "tool_results": results,
+                            "iterations": iteration,
+                            "usage": self.llm.get_usage_stats(),
+                        }
+                    else:
+                        # Model hallucinated empty tool calls AND empty text.
+                        # Inject a system prompt to correct it.
+                        logger.warning("[Orchestrator] LLM returned empty tool calls and empty text. Injecting correction.")
+                        conversation.append(LLMMessage(
+                            role="user",
+                            content="Error: You provided an empty tool call or empty text. Please respond with text or a valid tool call."
+                        ))
 
             else:
                 # No tool calls — LLM is done, return final response
