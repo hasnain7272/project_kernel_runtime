@@ -62,14 +62,44 @@ mcp:
   host: "0.0.0.0"
   port: 8090
   protocol_versions:
-    - "2025-03-26"
-    - "2024-11-05"
+  - "2025-03-26"
+  - "2024-11-05"
   session_timeout_seconds: 3600
   max_sessions: 100
   tools_enabled: true
   resources_enabled: true
   prompts_enabled: true
   sampling_enabled: false
+
+# ── MCP Servers Registry ──
+# Supports any MCP/MCO compatible server
+mcpServers:
+  # Example: Blender MCP server (disabled by default)
+  blender-mcp:
+    command: "C:/BlenderCopilot_venv/Scripts/python.exe"
+    args: ["-m", "blender_mcp_server.server"]
+    env:
+      PYTHONPATH: "d:/AI_Content_Studio/ai_blender_cinematic/antigravity/blender-mcp-server/src/"
+    disabled: true
+    auto_start: false
+    health_check_interval: 30
+    retry_on_failure: true
+    max_retries: 3
+    startup_timeout: 30
+  
+  # Example: Filesystem MCP server (built-in)
+  filesystem-mcp:
+    command: "python"
+    args: ["-m", "mcp_server_filesystem"]
+    disabled: true
+    auto_start: false
+  
+  # Example: Web search MCP server
+  websearch-mcp:
+    command: "node"
+    args: ["websearch-server.js"]
+    disabled: true
+    auto_start: false
 
 # ── Sandbox / Execution Isolation ──
 sandbox:

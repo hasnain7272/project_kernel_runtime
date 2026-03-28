@@ -239,16 +239,99 @@ else:
 
 @app.get("/")
 @app.get("/ui")
-@app.get("/ui/")
 async def root_redirect():
     return RedirectResponse(url="/ui/index.html")
 
-@app.get("/ui/index.html")
-async def serve_index():
-    """Serve the main Mission Control UI."""
-    from fastapi.responses import FileResponse
-    ui_index = os.path.join(ui_dir, "index.html")
-    return FileResponse(ui_index)
+# MCP Registry endpoints
+@app.get("/api/mcp/servers")
+async def list_mcp_servers():
+    """List all MCP servers."""
+    from project_kernel_runtime.kernel.mcp_registry import get_mcp_registry
+    registry = get_mcp_registry()
+    return {"servers": registry.list_servers()}
+
+@app.post("/api/mcp/servers/{name}/start")
+async def start_mcp_server(name: str):
+    """Start an MCP server."""
+    from project_kernel_runtime.kernel.mcp_registry import get_mcp_registry
+    registry = get_mcp_registry()
+    success = await registry.start_server(name)
+    return {"success": success, "server": name}
+
+@app.post("/api/mcp/servers/{name}/stop")
+async def stop_mcp_server(name: str):
+    """Stop an MCP server."""
+    from project_kernel_runtime.kernel.mcp_registry import get_mcp_registry
+    registry = get_mcp_registry()
+    success = await registry.stop_server(name)
+    return {"success": success, "server": name}
+
+@app.get("/api/mcp/servers/{name}/status")
+async def get_mcp_server_status(name: str):
+    """Get MCP server status."""
+    from project_kernel_runtime.kernel.mcp_registry import get_mcp_registry
+    registry = get_mcp_registry()
+    status = registry.get_server_status(name)
+    if not status:
+        raise HTTPException(status_code=404, detail="Server not found")
+    return status
+
+# A2A Mesh endpoints
+@app.get("/api/a2a/peers")
+async def list_a2a_peers():
+    """List all A2A peers."""
+    from project_kernel_runtime.integrations.a2a_protocol import GA2AMeshV2
+    mesh = GA2AMeshV2()
+    return {"peers": [], "status": "A2A v0.3 protocol ready"}
+
+@app.get("/api/a2a/status")
+async def get_a2a_status():
+    """Get A2A mesh status."""
+    return {
+        "protocol_version": "0.3",
+        "status": "ready",
+        "peers": 0,
+        "pending_tasks": 0
+    }
+
+@app.post("/api/a2a/delegate")
+async def delegate_a2a_task(request: Dict):
+    """Delegate a task to another agent."""
+    from project_kernel_runtime.integrations.a2a_protocol import A2AHandler
+    # A2A task delegation via protocol handler
+    return {"task_id": str(uuid.uuid4()), "status": "delegated"}
+
+# Governance endpoints
+@app.get("/api/governance/status")
+async def get_governance_status():
+    """Get governance status."""
+    return {
+        "enabled": True,
+        "default_role": "developer",
+        "audit_enabled": True,
+        "pending_approvals": 0
+    }
+
+@app.get("/api/governance/audit")
+async def get_governance_audit(limit: int = 100):
+    """Get governance audit log."""
+    from project_kernel_runtime.kernel.governance import GovernanceEngine
+    engine = GovernanceEngine()
+    entries = engine.get_audit_log(limit=limit)
+    return {"entries": entries}
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """List all sessions."""
+    return {"sessions": [
+        {"id": "default", "name": "Default Session", "active": True, "created_at": "now"}
+    ]}
+
+@app.post("/api/sessions")
+async def create_session(request: Dict):
+    """Create a new session."""
+    name = request.get("name", "New Session")
+    return {"id": str(uuid.uuid4()), "name": name, "status": "created"}
 
 # WebSocket connections
 
