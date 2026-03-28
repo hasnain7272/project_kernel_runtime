@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antigravity Agentic OS - Horizon 2028</title>
+    <!-- Tailwind CSS (Keep synchronous to parse config immediately, UI flashes otherwise) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Vue 3 -->
+    <script defer src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" media="print" onload="this.media='all'">
+    <!-- D3.js for Topology Graphs -->
+    <script defer src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: '#0a0a0f',
+                        darker: '#050508',
+                        card: '#16161e',
+                        primary: '#3b82f6',
+                        accent: '#8b5cf6',
+                        success: '#10b981',
+                        danger: '#f43f5e',
+                        warning: '#f59e0b',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #050508; color: #f3f4f6; }
+        .glass-panel {
+            background: rgba(22, 22, 30, 0.65);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+        .blinking-dot { animation: blink 2s infinite; }
+        @keyframes blink { 0% { opacity: 0.2; } 50% { opacity: 1; } 100% { opacity: 0.2; } }
+        /* Spatial Grid Background */
+        .bg-grid {
+            background-size: 40px 40px;
+            background-image: linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+        }
+        .node circle { fill: #10b981; stroke: #fff; stroke-width: 1.5px; }
+        .node text { font: 10px sans-serif; fill: white; pointer-events: none; }
+        .link { fill: none; stroke: #4b5563; stroke-width: 1.5px; opacity: 0.6; }
+    </style>
+</head>
+<body class="bg-darker antialiased selection:bg-primary selection:text-white h-screen overflow-hidden flex font-sans bg-grid relative">
+    
+    <div id="app" class="flex w-full h-full relative z-10">
+        
+        <!-- Sidebar Navigation -->
+        <aside class="w-20 lg:w-64 glass-panel border-r border-[#1f1f2e] flex flex-col transition-all duration-300">
+            <div class="h-20 flex items-center justify-center lg:justify-start lg:px-6 border-b border-[#1f1f2e]">
+                <div class="relative">
+                    <i class="fa-solid fa-atom text-accent text-3xl animate-[spin_10s_linear_infinite]"></i>
+                    <div class="absolute inset-0 bg-accent blur-xl opacity-30"></div>
+                </div>
+                <div class="hidden lg:block ml-4">
+                    <span class="font-bold text-lg tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-primary via-accent to-pink-500">Antigravity</span>
+                    <div class="text-[10px] text-gray-500 uppercase tracking-widest font-mono">Agentic OS 2028</div>
+                </div>
+            </div>
+            
+            <nav class="flex-1 py-6 flex flex-col gap-2 px-3">
+                <button @click="currentTab = 'dashboard'" :class="currentTab === 'dashboard' ? 'bg-primary/10 text-primary border-primary' : 'text-gray-400 hover:bg-white/5 hover:text-white border-transparent'" class="flex items-center p-3 rounded-lg border-l-2 transition-all group">
+                    <i class="fa-solid fa-chart-line text-lg w-6 flex justify-center group-hover:scale-110 transition-transform"></i>
+                    <span class="hidden lg:block ml-3 font-medium text-sm">Command Center</span>
+                </button>
+                <button @click="currentTab = 'topology'" :class="currentTab === 'topology' ? 'bg-success/10 text-success border-success' : 'text-gray-400 hover:bg-white/5 hover:text-white border-transparent'" class="flex items-center p-3 rounded-lg border-l-2 transition-all group">
+                    <i class="fa-solid fa-project-diagram text-lg w-6 flex justify-center group-hover:scale-110 transition-transform"></i>
+                    <span class="hidden lg:block ml-3 font-medium text-sm">Spatial Topology</span>
+                </button>
+                <button @click="currentTab = 'kanban'" :class="currentTab === 'kanban' ? 'bg-amber-500/10 text-amber-500 border-amber-500' : 'text-gray-400 hover:bg-white/5 hover:text-white border-transparent'" class="flex items-center p-3 rounded-lg border-l-2 transition-all group">
+                    <i class="fa-solid fa-list-check text-lg w-6 flex justify-center group-hover:scale-110 transition-transform"></i>
+                    <span class="hidden lg:block ml-3 font-medium text-sm">Agent Kanban</span>
+                </button>
+                <button @click="currentTab = 'terminal'" :class="currentTab === 'terminal' ? 'bg-accent/10 text-accent border-accent' : 'text-gray-400 hover:bg-white/5 hover:text-white border-transparent'" class="flex items-center p-3 rounded-lg border-l-2 transition-all group">
+                    <i class="fa-solid fa-microchip text-lg w-6 flex justify-center group-hover:scale-110 transition-transform"></i>
+                    <span class="hidden lg:block ml-3 font-medium text-sm">Swarm Execution</span>
+                </button>
+                <button @click="currentTab = 'protocols'" :class="currentTab === 'protocols' ? 'bg-cyan-500/10 text-cyan-500 border-cyan-500' : 'text-gray-400 hover:bg-white/5 hover:text-white border-transparent'" class="flex items-center p-3 rounded-lg border-l-2 transition-all group">
+                    <i class="fa-solid fa-server text-lg w-6 flex justify-center group-hover:scale-110 transition-transform"></i>
+                    <span class="hidden lg:block ml-3 font-medium text-sm">Protocol Matrix</span>
+                </button>
+                <button @click="currentTab = 'memory'" :class="currentTab === 'memory' ? 'bg-pink-500/10 text-pink-500 border-pink-500' : 'text-gray-400 hover:bg-white/5 hover:text-white border-transparent'" class="flex items-center p-3 rounded-lg border-l-2 transition-all group">
+                    <i class="fa-solid fa-database text-lg w-6 flex justify-center group-hover:scale-110 transition-transform"></i>
+                    <span class="hidden lg:block ml-3 font-medium text-sm">Memory Fabric</span>
+                </button>
+            </nav>
+            
+            <div class="p-4 border-t border-[#1f1f2e]">
+                <div class="flex items-center justify-center lg:justify-start">
+                    <div class="h-2 w-2 rounded-full mr-3 shadow-[0_0_8px_currentColor]" :class="sysStatus.status === 'error' ? 'bg-danger text-danger' : (isConnected ? 'bg-success text-success blinking-dot' : 'bg-warning text-warning')"></div>
+                    <span class="text-[10px] text-gray-400 hidden lg:block uppercase tracking-widest font-mono">{{ isConnected ? 'A2A Uplink Active' : 'Aligning Crystals...' }}</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="flex-1 flex flex-col h-full overflow-hidden relative">
+            
+            <!-- System Vitrics HUD Overlay (Absolute Top Right) -->
+            <div class="absolute top-4 right-6 z-50 flex gap-3 pointer-events-none">
+                <div class="glass-panel px-4 py-2 rounded-full flex items-center gap-3 backdrop-blur-md border-[#1f1f2e] pointer-events-auto shadow-lg">
+                    <div class="flex flex-col">
+                        <span class="text-[8px] uppercase tracking-widest text-gray-500 font-bold mb-0.5">SRE Circuit</span>
+                        <div class="flex items-center">
+                            <i class="fa-solid" :class="sysStatus.sre?.circuit_breaker_open ? 'fa-triangle-exclamation text-danger' : 'fa-check text-success'"></i>
+                            <span class="text-xs font-mono ml-1.5" :class="sysStatus.sre?.circuit_breaker_open ? 'text-danger shadow-danger' : 'text-success'">
+                                {{ sysStatus.sre?.circuit_breaker_open ? 'TRIPPED' : 'SECURE' }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="glass-panel px-4 py-2 rounded-full flex items-center gap-4 backdrop-blur-md border-[#1f1f2e] pointer-events-auto shadow-lg" v-if="sysStatus.watchdog">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-microchip text-primary/70 text-sm"></i>
+                        <span class="font-mono text-xs text-gray-200">{{ sysStatus.watchdog.cpu_percent }}%</span>
+                    </div>
+                    <div class="w-px h-4 bg-gray-700"></div>
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-memory text-accent/70 text-sm"></i>
+                        <span class="font-mono text-xs text-gray-200">{{ sysStatus.watchdog.memory_percent }}%</span>
+                    </div>
+                </div>
+            </div>
+
+            <header class="h-20 flex items-center justify-between pl-8 pr-64 z-20 pt-4">
+                <h2 class="text-2xl font-light text-white tracking-wide flex items-center">
+                    {{ currentTab === 'dashboard' ? 'Command Center' : 
+                       currentTab === 'topology' ? 'Spatial Topology' :
+                       currentTab === 'kanban' ? 'Agent Kanban' :
+                       currentTab === 'protocols' ? 'Protocol Matrix' :
+                       currentTab === 'terminal' ? 'Swarm Execution' : 'Memory Fabric' }}
+                </h2>
+                
+                <!-- Dynamic Inference Router (Global) -->
+                <div class="glass-panel px-4 py-2 rounded-lg flex items-center gap-2 border border-[#2d2d3f] backdrop-blur-md">
+                    <span class="text-xs font-mono text-gray-400 uppercase tracking-widest hidden md:block">Inference Core:</span>
+                    <select v-model="inferenceProvider" @change="patchProvider" class="bg-[#0a0a0f] border border-[#2d2d3f] text-xs text-white rounded px-2 py-1 outline-none focus:border-accent">
+                        <option value="ollama">Ollama (Local)</option>
+                        <option value="openai">OpenAI (Remote)</option>
+                        <option value="anthropic">Anthropic (Remote)</option>
+                    </select>
+                    <!-- Show advanced Ollama connection settings natively -->
+                    <template v-if="inferenceProvider === 'ollama'">
+                        <input type="text" v-model="inferenceHost" @change="patchProvider" class="bg-[#0a0a0f] border border-[#2d2d3f] rounded px-2 py-1 text-xs text-white w-24 outline-none focus:border-accent" placeholder="Host (127.0.0.1)">
+                        <input type="text" v-model="inferencePort" @change="patchProvider" class="bg-[#0a0a0f] border border-[#2d2d3f] rounded px-2 py-1 text-xs text-white w-20 outline-none focus:border-accent" placeholder="Port (11434)">
+                    </template>
+                    <input type="text" v-model="inferenceModel" @change="patchProvider" class="bg-[#0a0a0f] border border-[#2d2d3f] rounded px-2 py-1 text-xs text-cyan-400 w-32 outline-none focus:border-cyan-500 font-mono" placeholder="Model Tag">
+                </div>
+            </header>
+
+            <!-- Scrollable Router View -->
+            <div class="flex-1 overflow-y-auto custom-scrollbar p-8 pt-4">
+                
+                <!-- DASHBOARD TAB -->
+                <div v-show="currentTab === 'dashboard'" class="space-y-8 animate-fade-in text-red-500">
+                    <!-- FSM Real-time Widgets -->
+                    <div class="grid grid-cols-4 gap-4">
+                        <div v-for="state in ['Idle', 'Gathering', 'Planning', 'Acting', 'Verifying']" :key="state" 
+                             class="glass-panel p-4 rounded-xl border-t-2 transition-all relative overflow-hidden"
+                             :class="activeFsmState === state ? 'border-t-accent shadow-[0_0_20px_rgba(139,92,246,0.2)] bg-accent/5' : 'border-t-transparent'">
+                            <div class="text-[10px] uppercase tracking-widest text-gray-500 mb-1">State Machine</div>
+                            <div class="text-sm font-bold" :class="activeFsmState === state ? 'text-white' : 'text-gray-400'">{{ state }}</div>
+                            <div v-if="activeFsmState === state" class="absolute right-3 top-1/2 -translate-y-1/2">
+                                <span class="flex h-3 w-3 relative">
+                                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
+                                  <span class="relative inline-flex rounded-full h-3 w-3 bg-accent"></span>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Predictive Nudge Feed -->
+                    <div class="glass-panel p-6 rounded-2xl border border-[#1f1f2e]">
+                        <h3 class="text-sm font-bold text-gray-300 uppercase tracking-widest flex items-center mb-4">
+                            <i class="fa-solid fa-wand-magic-sparkles text-pink-500 mr-2"></i> Predictive Action Feed
+                        </h3>
+                        <div class="flex gap-4 overflow-x-auto custom-scrollbar pb-2">
+                            <div v-if="predictiveNudges.length === 0" class="text-gray-500 text-sm italic py-4">
+                                Analyzing local context... No immediate nudges.
+                            </div>
+                            <!-- Proactive agents suggesting next steps -->
+                            <div v-for="(nudge, idx) in predictiveNudges" :key="idx" 
+                                 class="shrink-0 w-64 bg-black/40 border border-[#2d2d3f] p-4 rounded-xl hover:border-pink-500/50 transition-colors cursor-pointer"
+                                 @click="acceptNudge(nudge)">
+                                <div class="flex justify-between items-start mb-2">
+                                    <span class="text-xs font-mono text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded">{{ nudge.confidence }}% Match</span>
+                                    <i class="fa-solid fa-arrow-right text-gray-600"></i>
+                                </div>
+                                <div class="text-sm text-gray-200 mt-2">{{ nudge.suggestion }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TOPOLOGY TAB (D3 Mesh Graph) -->
+                <div v-show="currentTab === 'topology'" class="h-full flex flex-col space-y-4">
+                    <div class="glass-panel flex-1 rounded-2xl relative overflow-hidden border border-[#1f1f2e]">
+                        <!-- D3 Container -->
+                        <div id="d3-container" class="w-full h-full bg-[#030305]"></div>
+                        
+                        <!-- Graph overlay info -->
+                        <div class="absolute bottom-6 left-6 glass-panel p-4 rounded-xl border border-gray-800">
+                            <div class="text-xs font-mono text-gray-400 mb-2">Network Nodes</div>
+                            <div class="flex items-center gap-4 text-sm">
+                                <div class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-success mr-2"></span> Mesh Peers ({{ Object.keys(sysStatus.mesh?.active_peers || {}).length }})</div>
+                                <div class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-accent mr-2"></span> Active Agents ({{ activeTasksCount }})</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TERMINAL TAB -->
+                <div v-show="currentTab === 'terminal'" class="h-full flex flex-col space-y-4">
+                    <div class="glass-panel p-5 rounded-2xl border border-[#1f1f2e]">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-sm font-bold text-gray-300 uppercase tracking-widest"><i class="fa-solid fa-code text-accent mr-2"></i>Swarm CLI</h3>
+                        </div>
+                        <div class="flex gap-4">
+                            <textarea 
+                                v-model="taskInput"
+                                @keydown.ctrl.enter="executeTask"
+                                placeholder="Command the Swarm... (Ctrl+Enter to dispatch)" 
+                                class="w-full bg-[#0a0a0f] border border-[#2d2d3f] rounded-xl p-4 text-sm text-gray-200 focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent custom-scrollbar resize-none h-24 transition-all"></textarea>
+                            <button 
+                                @click="executeTask" 
+                                :disabled="isExecuting || !taskInput"
+                                class="bg-accent hover:bg-purple-500 text-white font-bold py-2 px-6 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex flex-col items-center justify-center shrink-0 w-32">
+                                <i v-if="isExecuting" class="fa-solid fa-circle-notch fa-spin text-2xl mb-1"></i>
+                                <i v-else class="fa-solid fa-paper-plane text-2xl mb-1"></i>
+                                <span class="text-xs uppercase tracking-wider mt-1">{{ isExecuting ? 'Running...' : 'Dispatch' }}</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="flex-1 glass-panel rounded-2xl border border-[#1f1f2e] flex flex-col relative w-full overflow-hidden">
+                        <div class="absolute top-0 w-full h-10 bg-black/40 border-b border-[#1f1f2e] flex items-center px-5 justify-between z-10">
+                            <span class="text-[10px] uppercase font-mono tracking-widest text-gray-500">AUI Event Stream</span>
+                            <!-- Swarm Control (Stop Task) -->
+                            <button v-if="isExecuting" @click="stopTask" class="text-[10px] bg-danger/20 text-danger hover:bg-danger hover:text-white border border-danger/50 px-3 py-1 rounded transition-colors uppercase font-bold tracking-wider">
+                                <i class="fa-solid fa-stop mr-1"></i> Halt Agent
+                            </button>
+                        </div>
+                        <div class="pt-12 p-5 font-mono text-sm overflow-y-auto custom-scrollbar h-full bg-[#050508]">
+                            <div v-if="taskLogs.length === 0" class="text-gray-600 italic">Swarm AUI stream connected. Waiting for agentic events...</div>
+                            <div v-for="(log, idx) in taskLogs" :key="idx" class="mb-3 leading-relaxed">
+                                <span class="text-xs text-gray-600 mr-3">[{{ log.time }}]</span> 
+                                <span :class="log.color" v-html="log.text"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- MEMORY TAB -->
+                <div v-show="currentTab === 'memory'" class="space-y-6 flex flex-col h-full">
+                    <div class="glass-panel p-6 rounded-2xl border border-[#1f1f2e] shrink-0">
+                        <h3 class="text-sm font-bold text-gray-300 uppercase tracking-widest mb-4"><i class="fa-solid fa-brain text-pink-500 mr-2"></i>Memory Fabric Injection</h3>
+                        <p class="text-xs text-gray-500 mb-4">Inject semantic knowledge directly into the ChromaDB vector fabric for immediate agent retrieval.</p>
+                        
+                        <textarea v-model="memoryContent" placeholder="Enter knowledge or facts..." class="w-full bg-[#0a0a0f] border border-[#2d2d3f] rounded-xl p-4 text-sm text-gray-200 focus:outline-none focus:border-pink-500 custom-scrollbar h-32 mb-4"></textarea>
+                        
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-4">
+                                <span class="text-xs text-gray-400">Agent Scope:</span>
+                                <input type="text" v-model="memoryAgentId" class="bg-[#0a0a0f] border border-[#2d2d3f] rounded px-3 py-1.5 text-xs text-white" placeholder="system">
+                            </div>
+                            <button @click="injectMemory" class="bg-pink-500 hover:bg-pink-600 text-white font-bold py-2 px-6 rounded-lg transition-colors text-xs uppercase tracking-wider">
+                                <i class="fa-solid fa-database mr-2"></i> Inject Knowledge
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-panel p-6 rounded-2xl border border-[#1f1f2e] flex-1 flex flex-col min-h-0">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-sm font-bold text-gray-300 uppercase tracking-widest"><i class="fa-solid fa-layer-group text-pink-500 mr-2"></i>Semantic Explorer</h3>
+                            <div class="flex gap-2">
+                                <input type="text" v-model="memorySearchQuery" @keydown.enter="searchMemory" class="bg-[#0a0a0f] border border-[#2d2d3f] text-xs text-white rounded px-3 py-1.5 outline-none focus:border-pink-500 w-64" placeholder="Vector search...">
+                                <button @click="searchMemory" class="bg-pink-500/20 hover:bg-pink-500 text-pink-400 hover:text-white font-bold px-4 rounded transition-colors text-xs uppercase tracking-wider">
+                                    Search
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="flex-1 overflow-y-auto custom-scrollbar pr-2 mt-4 space-y-3">
+                            <div v-if="memoryResults.length === 0 && !isSearchingMemory" class="text-xs text-gray-600 italic mt-8 text-center">Run a semantic search to visualize vector mappings.</div>
+                            <div v-if="isSearchingMemory" class="text-center mt-8"><i class="fa-solid fa-spinner fa-spin text-pink-500 text-2xl"></i></div>
+                            
+                            <div v-for="(memory, idx) in memoryResults" :key="idx" class="bg-black/40 border border-[#1f1f2e] p-4 rounded-xl flex flex-col gap-2 hover:border-pink-500/30 transition-colors">
+                                <div class="flex justify-between items-start">
+                                    <span class="text-[10px] bg-pink-500/20 text-pink-400 px-2 py-0.5 rounded font-mono uppercase tracking-widest">{{ memory.metadata?.source || 'unknown' }}</span>
+                                    <span v-if="memory.distance !== undefined" class="text-[10px] text-gray-500 font-mono">Distance: {{ memory.distance?.toFixed(3) }}</span>
+                                </div>
+                                <div class="text-sm text-gray-200 mt-1 whitespace-pre-wrap">{{ memory.content || memory }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- KANBAN TAB -->
+                <div v-show="currentTab === 'kanban'" class="h-full flex flex-col space-y-4">
+                    <div class="glass-panel p-5 rounded-2xl border border-[#1f1f2e] mb-4">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-sm font-bold text-gray-300 uppercase tracking-widest"><i class="fa-solid fa-list-check text-amber-500 mr-2"></i>Isolated Agent Sessions</h3>
+                            <button class="bg-amber-500/20 text-amber-500 border border-amber-500/50 hover:bg-amber-500 hover:text-white px-4 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors">
+                                + Spawn Sub-Agent
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-500">Track multi-agent coordination across independent isolated memory sessions (NemoClaw-style sandbox arrays).</p>
+                    </div>
+                    
+                    <div class="flex-1 flex gap-4 overflow-x-auto custom-scrollbar pb-4">
+                        <!-- Kanban Column: Planning -->
+                        <div class="w-80 shrink-0 flex flex-col glass-panel rounded-xl border border-[#1f1f2e] bg-black/20">
+                            <div class="p-3 border-b border-[#1f1f2e] flex justify-between items-center">
+                                <span class="text-xs font-bold text-gray-300 uppercase tracking-widest">Planning</span>
+                                <span class="bg-[#1f1f2e] text-gray-400 text-[10px] px-2 py-0.5 rounded-full">0</span>
+                            </div>
+                            <div class="p-3 flex-1 overflow-y-auto space-y-3">
+                                <div class="text-xs text-gray-600 italic text-center mt-4">No agents planning.</div>
+                            </div>
+                        </div>
+                        <!-- Kanban Column: Executing -->
+                        <div class="w-80 shrink-0 flex flex-col glass-panel rounded-xl border border-[#1f1f2e] bg-black/20">
+                            <div class="p-3 border-b border-[#1f1f2e] flex justify-between items-center bg-black/40 rounded-t-xl">
+                                <span class="text-xs font-bold text-accent uppercase tracking-widest flex items-center gap-2"><i class="fa-solid fa-play fa-fade text-accent"></i> Executing</span>
+                                <span class="bg-accent/20 text-accent text-[10px] px-2 py-0.5 rounded-full font-mono">{{ activeTasksCount > 0 ? 1 : 0 }}</span>
+                            </div>
+                            <div class="p-3 flex-1 overflow-y-auto space-y-3 custom-scrollbar">
+                                <div v-if="activeTasksCount > 0 && activeFsmState !== 'Idle'" class="bg-[#0a0a0f] border border-[#2d2d3f] p-4 rounded-lg hover:border-accent/40 transition-colors shadow-lg relative group">
+                                    <div class="flex justify-between items-start mb-3">
+                                        <span class="text-[10px] bg-accent/20 text-accent border border-accent/30 px-2 py-0.5 rounded font-mono shadow-sm">Agent-001 [Task: root-node]</span>
+                                        <i class="fa-solid fa-spinner fa-spin text-accent text-xs"></i>
+                                    </div>
+                                    <div class="text-xs text-gray-300 line-clamp-2 leading-relaxed h-8">{{ taskInput || 'Executing dispatch command...' }}</div>
+                                    <div class="mt-4 w-full bg-[#1f1f2e] rounded-full h-1 overflow-hidden shadow-inner">
+                                        <div class="bg-gradient-to-r from-accent to-purple-500 h-full animate-[pulse_2s_ease-in-out_infinite] w-[45%]"></div>
+                                    </div>
+                                    
+                                    <!-- Embedded D3.js GraphRAG Canvas for inner ReAct loop metrics -->
+                                    <div class="mt-4 w-full h-16 bg-[#030305] rounded border border-[#1f1f2e] overflow-hidden flex items-center justify-center relative">
+                                        <div class="text-[9px] text-gray-600 font-mono tracking-widest uppercase absolute z-10 bottom-1 right-2">GraphRAG Trace</div>
+                                        <div class="absolute inset-0 pattern-dots-sm text-white/5 opacity-50"></div>
+                                        <div class="flex gap-2 items-center text-accent/50">
+                                            <div class="w-1.5 h-1.5 rounded-full bg-accent animate-ping"></div>
+                                            <div class="w-4 h-px bg-accent/30"></div>
+                                            <div class="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse"></div>
+                                            <div class="w-4 h-px bg-purple-500/30"></div>
+                                            <div class="w-2 h-2 rounded-sm border border-pink-500 rotate-45 animate-pulse"></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Horizon 2028 Actions Bar -->
+                                    <div class="mt-3 pt-3 border-t border-[#1f1f2e] flex justify-between items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button @click="forkReality('tsk-001')" class="text-[10px] uppercase font-bold tracking-widest text-[#00E5FF] hover:bg-[#00E5FF]/10 px-2 py-1 rounded transition-colors flex items-center gap-1">
+                                            <i class="fa-solid fa-code-branch"></i> Fork Reality
+                                        </button>
+                                        <button @click="sreAutoHeal('Agent-001')" class="text-[10px] uppercase font-bold tracking-widest text-red-500 hover:bg-red-500/10 px-2 py-1 rounded transition-colors flex items-center gap-1">
+                                            <i class="fa-solid fa-heart-pulse"></i> SRE Heal
+                                        </button>
+                                    </div>
+                                </div>
+                                <div v-else class="text-xs text-gray-600 italic text-center mt-12">No active executions.</div>
+                            </div>
+                        </div>
+                        <!-- Kanban Column: Pending User Review (Cursor Style) -->
+                        <div class="w-80 shrink-0 flex flex-col glass-panel rounded-xl border border-warning/30 bg-black/20">
+                            <div class="p-3 border-b border-warning/30 flex justify-between items-center">
+                                <span class="text-xs font-bold text-warning uppercase tracking-widest">Awaiting Review</span>
+                                <span class="bg-warning/20 text-warning text-[10px] px-2 py-0.5 rounded-full">0</span>
+                            </div>
+                            <div class="p-3 flex-1 overflow-y-auto space-y-3">
+                                <div class="text-xs text-gray-600 italic text-center mt-4">No diffs awaiting review.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PROTOCOLS TAB -->
+                <div v-show="currentTab === 'protocols'" class="space-y-6">
+                    <div class="glass-panel p-6 rounded-2xl border border-[#1f1f2e]">
+                        <h3 class="text-sm font-bold text-gray-300 uppercase tracking-widest mb-4"><i class="fa-solid fa-network-wired text-cyan-500 mr-2"></i>Global Protocol Matrix</h3>
+                        <p class="text-xs text-gray-500 mb-6">Manage MCP (Model Context Protocol) 2026 servers and MCO (Model Context Objects) exposed to all agent sessions.</p>
+                        
+                        <div class="grid grid-cols-2 gap-6">
+                            <!-- Local Registry -->
+                            <div class="bg-[#0a0a0f] border border-[#2d2d3f] rounded-xl p-4">
+                                <div class="text-xs font-mono text-gray-400 mb-3 uppercase flex justify-between">
+                                    <span>Active MCP Nodes</span>
+                                    <button @click="fetchProtocols" class="text-cyan-500 hover:text-white"><i class="fa-solid fa-rotate"></i></button>
+                                </div>
+                                <div class="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-2">
+                                    <div v-if="mcpProtocols.length === 0" class="text-xs text-gray-600 text-center italic py-2">No active protocols</div>
+                                    <div v-for="proto in mcpProtocols" :key="proto.name" class="bg-black/40 border border-[#1f1f2e] flex justify-between items-center p-3 rounded-lg">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-2 h-2 rounded-full shadow-[0_0_8px_#10b981]" :class="proto.type === 'websocket' ? 'bg-[#00E5FF]' : 'bg-success'"></div>
+                                            <div>
+                                                <div class="text-sm text-gray-200">
+                                                    {{ proto.name }}
+                                                    <span v-if="proto.persistence === 'permanent'" class="text-[9px] bg-accent/20 text-accent px-1 rounded ml-1 uppercase">Saved</span>
+                                                </div>
+                                                <div class="text-[10px] text-gray-500 font-mono">{{ proto.type }}: {{ proto.command || proto.url }}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Add New Node -->
+                            <div class="bg-[#0a0a0f] border border-cyan-500/20 rounded-xl p-4 flex flex-col justify-between relative overflow-hidden">
+                                <div class="absolute inset-0 bg-cyan-500 opacity-[0.02] pointer-events-none"></div>
+                                <div>
+                                    <div class="text-xs font-mono text-cyan-500 mb-3 uppercase">Mount New Protocol</div>
+                                    <div class="space-y-3 relative z-10">
+                                        <input type="text" v-model="newMcpName" class="w-full bg-black/60 border border-[#2d2d3f] text-xs text-white rounded p-2 outline-none focus:border-cyan-500" placeholder="Ext. Name (e.g. github-mcp)">
+                                        <div class="flex gap-2">
+                                            <select v-model="newMcpType" class="w-1/3 bg-black/60 border border-[#2d2d3f] rounded p-2 text-xs text-white outline-none focus:border-cyan-500">
+                                                <option value="stdio">Stdio</option>
+                                                <option value="websocket">Websocket</option>
+                                            </select>
+                                            <select v-model="newMcpPersistence" class="w-2/3 bg-black/60 border border-[#2d2d3f] rounded p-2 text-xs text-white outline-none focus:border-cyan-500">
+                                                <option value="memory">Session Only (RAM)</option>
+                                                <option value="permanent">Save Permanent (Disk)</option>
+                                            </select>
+                                        </div>
+                                        <input v-if="newMcpType === 'stdio'" type="text" v-model="newMcpCommand" class="w-full bg-black/60 border border-[#2d2d3f] text-xs font-mono text-cyan-400 rounded p-2 outline-none focus:border-cyan-500" placeholder="npx -y @modelcontextprotocol/server-github">
+                                        <input v-if="newMcpType === 'websocket'" type="text" v-model="newMcpUrl" class="w-full bg-black/60 border border-[#2d2d3f] text-xs font-mono text-cyan-400 rounded p-2 outline-none focus:border-cyan-500" placeholder="ws://localhost:3000">
+                                    </div>
+                                </div>
+                                <button @click="mountProtocol" class="w-full bg-cyan-500/20 hover:bg-cyan-500 text-cyan-400 hover:text-white font-bold py-2 rounded transition-colors text-xs uppercase tracking-wider mt-4 disabled:opacity-50" :disabled="isMountingMcp">
+                                    <i v-if="isMountingMcp" class="fa-solid fa-spinner fa-spin mr-2"></i> Initializing System Call
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- Application Script -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!window.Vue) {
+                console.error("Vue failed to load.");
+                return;
+            }
+            const { createApp } = Vue;
+            
+            createApp({
+                data() {
+                    return {
+                        currentTab: 'dashboard',
+                        isConnected: false,
+                    sysStatus: {},
+                    rawMetrics: '',
+                    
+                    // Dashboard Elements
+                    activeFsmState: 'Idle',
+                    predictiveNudges: [
+                        { suggestion: 'Refactor ui_app.py to use React', confidence: 94 },
+                        { suggestion: 'Review SRE logs for trailing exceptions', confidence: 82 }
+                    ],
+                    activeTasksCount: 0,
+                    
+                    // Task Execution
+                    taskInput: '',
+                    isExecuting: false,
+                    currentTaskId: null,
+                    taskLogs: [],
+                    
+                    // Memory Sync
+                    memoryContent: '',
+                    memoryAgentId: 'system',
+                    memorySearchQuery: '',
+                    memoryResults: [],
+                    isSearchingMemory: false,
+                    
+                    // API Endpoint
+                    baseUrl: 'http://127.0.0.1:8089',
+                    eventSource: null,
+                    
+                    // Provider Settings
+                    inferenceProvider: 'ollama',
+                    inferenceHost: '127.0.0.1',
+                    inferencePort: '11500',
+                    inferenceModel: 'qwen2.5-coder:7b-instruct-q4_K_M',
+                    
+                    // MCP Management
+                    mcpProtocols: [],
+                    newMcpName: '',
+                    newMcpType: 'stdio',
+                    newMcpCommand: '',
+                    newMcpUrl: '',
+                    newMcpPersistence: 'memory',
+                    isMountingMcp: false
+                }
+            },
+            mounted() {
+                this.initDashboard();
+                this.initTopologyGraph();
+                this.fetchProtocols();
+                setInterval(this.fetchStatus, 5000);
+            },
+            methods: {
+                async fetchProtocols() {
+                    try {
+                        const res = await fetch(`${this.baseUrl}/protocols/mcp`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            this.mcpProtocols = data.protocols || [];
+                        }
+                    } catch (e) {
+                        this.addLog('ERROR', 'Failed to fetch global protocols matrix.', 'text-danger');
+                    }
+                },
+                async mountProtocol() {
+                    if (!this.newMcpName.trim()) return;
+                    this.isMountingMcp = true;
+                    try {
+                        const res = await fetch(`${this.baseUrl}/protocols/mcp/mount`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                name: this.newMcpName,
+                                type: this.newMcpType,
+                                command: this.newMcpCommand,
+                                url: this.newMcpUrl,
+                                persistence: this.newMcpPersistence
+                            })
+                        });
+                        if (res.ok) {
+                            this.addLog('MCP', `External protocol mounted: ${this.newMcpName} (${this.newMcpPersistence})`, 'text-[#00E5FF]');
+                            this.newMcpName = '';
+                            this.newMcpCommand = '';
+                            this.newMcpUrl = '';
+                            await this.fetchProtocols();
+                        } else {
+                            const err = await res.json();
+                            this.addLog('ERROR', err.detail || 'Protocol mounting failed', 'text-danger');
+                        }
+                    } catch(e) {
+                        this.addLog('ERROR', 'Protocol matrix handshake refused', 'text-danger');
+                    } finally {
+                        this.isMountingMcp = false;
+                    }
+                },
+                async searchMemory() {
+                    if (!this.memorySearchQuery.trim()) return;
+                    this.isSearchingMemory = true;
+                    try {
+                        const res = await fetch(`${this.baseUrl}/memory/search`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                query: this.memorySearchQuery,
+                                agent_id: this.memoryAgentId || "system",
+                                limit: 20
+                            })
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                            this.memoryResults = data.results || [];
+                        } else {
+                            this.addLog('ERROR', 'Semantic search failed.', 'text-danger');
+                        }
+                    } catch (e) {
+                         this.addLog('ERROR', 'VectorDB connection failed.', 'text-danger');
+                    } finally {
+                        this.isSearchingMemory = false;
+                    }
+                },
+                async patchProvider() {
+                    try {
+                        const res = await fetch(`${this.baseUrl}/system/provider`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                provider: this.inferenceProvider,
+                                model: this.inferenceModel,
+                                host: this.inferenceHost,
+                                port: this.inferencePort
+                            })
+                        });
+                        if (res.ok) {
+                            this.addLog('SYS', `Inference Core shifted computationally to ${this.inferenceProvider}://${this.inferenceHost}:${this.inferencePort}/${this.inferenceModel}`, 'text-cyan-400 font-bold');
+                        }
+                    } catch (e) {
+                        this.addLog('ERROR', 'Failed to shift inference provider.', 'text-danger');
+                    }
+                },
+                async forkReality(taskId) {
+                    try {
+                        const res = await fetch(`${this.baseUrl}/swarm/fork`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ task_id: taskId })
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            this.addLog('SWARM', `Reality Forked successfully. Thread ID divergence: ${data.new_task_id}`, 'text-[#00E5FF] font-bold');
+                        }
+                    } catch(e) {
+                        this.addLog('ERROR', 'Failed to fork reality.', 'text-danger');
+                    }
+                },
+                async sreAutoHeal(agentId) {
+                    try {
+                        const res = await fetch(`${this.baseUrl}/governance/sre_auto_heal`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ agent_id: agentId })
+                        });
+                        if(res.ok) {
+                            this.addLog('SRE', `Auto-Heal Protocol executed on ${agentId}. Watchdog activated.`, 'text-red-500 font-bold');
+                        }
+                    } catch(e) {
+                         this.addLog('ERROR', 'SRE Watchdog failed to inject correction payload.', 'text-danger');
+                    }
+                },
+                async initDashboard() {
+                    await this.fetchStatus();
+                    this.connectAUIStream();
+                    this.addLog('SYS', 'Agentic Spatial UI initialized.', 'text-primary');
+                },
+                connectAUIStream() {
+                    // Agentic UI WebSocket / SSE
+                    this.eventSource = new EventSource(`${this.baseUrl}/agent/ui/stream`);
+                    this.eventSource.onmessage = (e) => {
+                        try {
+                            const payload = JSON.parse(e.data);
+                            if(payload.topic === "task.transition") {
+                                this.activeFsmState = payload.data.state;
+                                this.addLog('FSM', `State Transit: ${payload.data.state}`, 'text-accent');
+                            }
+                            if(payload.topic === "swarm.predictive_nudge") {
+                                this.predictiveNudges.unshift(payload.data);
+                                if(this.predictiveNudges.length > 5) this.predictiveNudges.pop();
+                            }
+                            if(payload.topic === "system.log") {
+                                this.addLog('AGENT', payload.data.message, 'text-gray-300');
+                            }
+                        } catch(err) {}
+                    };
+                    this.eventSource.onerror = () => {
+                        this.isConnected = false;
+                    };
+                },
+                addLog(prefix, text, colorClass = 'text-white') {
+                    const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: 'numeric', minute: 'numeric', second: 'numeric' });
+                    this.taskLogs.push({ time, text: `<span class="font-bold mr-2 text-gray-500">[${prefix}]</span> ${text}`, color: colorClass });
+                    
+                    this.$nextTick(() => {
+                        const container = this.$el.querySelector('.bg-\\[\\#050508\\]');
+                        if (container) container.scrollTop = container.scrollHeight;
+                    });
+                },
+                async fetchStatus() {
+                    try {
+                        const res = await fetch(`${this.baseUrl}/status/full`);
+                        if (res.ok) {
+                            this.sysStatus = await res.json();
+                            this.isConnected = true;
+                            if(this.currentTab === 'topology') this.updateTopologyData();
+                        } else {
+                            this.isConnected = false;
+                        }
+                    } catch (e) {
+                        this.isConnected = false;
+                    }
+                },
+                acceptNudge(nudge) {
+                    this.taskInput = nudge.suggestion;
+                    this.currentTab = 'terminal';
+                },
+                async injectMemory() {
+                    if(!this.memoryContent) return;
+                    try {
+                        const res = await fetch(`${this.baseUrl}/memory/inject`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                content: this.memoryContent,
+                                agent_id: this.memoryAgentId || "system",
+                                importance: 0.8
+                            })
+                        });
+                        if(res.ok) {
+                            this.memoryContent = '';
+                            alert("Knowledge woven into Memory Fabric.");
+                        }
+                    } catch(e) {
+                        console.error("Injection failed");
+                    }
+                },
+                async executeTask() {
+                    if (!this.taskInput.trim() || this.isExecuting) return;
+                    
+                    const desc = this.taskInput.trim();
+                    this.taskInput = '';
+                    this.isExecuting = true;
+                    this.activeFsmState = 'Gathering';
+                    this.activeTasksCount++;
+                    
+                    this.addLog('HUMAN', `${desc}`, 'text-primary font-bold');
+                    
+                    // SSE Streaming — every step arrives as it happens
+                    const url = `${this.baseUrl}/agent/execute/stream?description=${encodeURIComponent(desc)}&user_id=api_user&max_iterations=10`;
+                    
+                    try {
+                        const eventSource = new EventSource(url);
+                        this._activeEventSource = eventSource;
+                        
+                        eventSource.onmessage = (event) => {
+                            try {
+                                const data = JSON.parse(event.data);
+                                const prefix = data.prefix || 'SYS';
+                                const text = data.text || '';
+                                const state = data.state || 'Acting';
+                                
+                                // Update FSM state indicator
+                                this.activeFsmState = state;
+                                
+                                // Color-code by prefix
+                                const colorMap = {
+                                    'SYS': 'text-gray-400',
+                                    'TASK': 'text-blue-400',
+                                    'TOOL': 'text-yellow-400 font-semibold',
+                                    'LLM': 'text-purple-400',
+                                    'GOVERNANCE': 'text-green-400',
+                                    'SWARM': 'text-cyan-400',
+                                    'MCP': 'text-orange-400',
+                                    'RESULT': 'text-success font-bold',
+                                    'ERROR': 'text-danger font-bold',
+                                };
+                                const cssClass = colorMap[prefix] || 'text-gray-300';
+                                
+                                this.addLog(prefix, text, cssClass);
+                                
+                                // If this is the final event, close the stream
+                                if (data.type === 'done' || data.type === 'error') {
+                                    eventSource.close();
+                                    this.isExecuting = false;
+                                    this.activeFsmState = 'Idle';
+                                    this.activeTasksCount--;
+                                }
+                            } catch (parseErr) {
+                                console.warn('SSE parse error:', parseErr);
+                            }
+                        };
+                        
+                        eventSource.onerror = (err) => {
+                            console.error('SSE connection error:', err);
+                            eventSource.close();
+                            if (this.isExecuting) {
+                                this.addLog('ERROR', 'Stream connection lost. Check server logs.', 'text-danger font-bold');
+                                this.isExecuting = false;
+                                this.activeFsmState = 'Idle';
+                                this.activeTasksCount--;
+                            }
+                        };
+                    } catch (e) {
+                        this.addLog('ERROR', 'Failed to open SSE stream.', 'text-danger font-bold');
+                        this.isExecuting = false;
+                        this.activeFsmState = 'Idle';
+                        this.activeTasksCount--;
+                    }
+                },
+                async stopTask() {
+                    // Close active SSE stream if running
+                    if (this._activeEventSource) {
+                        this._activeEventSource.close();
+                        this._activeEventSource = null;
+                    }
+                    this.addLog('SYS', 'FORCE HALT signal broadcasted to Mesh.', 'text-danger font-bold');
+                    this.isExecuting = false;
+                    this.activeFsmState = 'Idle';
+                    this.activeTasksCount = Math.max(0, this.activeTasksCount - 1);
+                },
+                
+                // D3.js Topology Graph Logic
+                initTopologyGraph() {
+                    this.width = document.getElementById('d3-container')?.clientWidth || 800;
+                    this.height = document.getElementById('d3-container')?.clientHeight || 600;
+                    
+                    this.svg = d3.select("#d3-container").append("svg")
+                        .attr("width", "100%")
+                        .attr("height", "100%")
+                        .append("g");
+
+                    this.simulation = d3.forceSimulation()
+                        .force("link", d3.forceLink().id(d => d.id).distance(100))
+                        .force("charge", d3.forceManyBody().strength(-200))
+                        .force("center", d3.forceCenter(this.width / 2, this.height / 2));
+                        
+                    this.updateTopologyData();
+                },
+                updateTopologyData() {
+                    if(!this.svg) return;
+                    
+                    const nodes = [{ id: "Core Kernel", group: 1 }];
+                    const links = [];
+                    
+                    // Add peers as nodes
+                    const peers = this.sysStatus.mesh?.active_peers || {};
+                    Object.keys(peers).forEach(pId => {
+                        nodes.push({ id: peers[pId].name || pId.substring(0,6), group: 2 });
+                        links.push({ source: "Core Kernel", target: peers[pId].name || pId.substring(0,6) });
+                    });
+                    
+                    if(this.activeTasksCount > 0) {
+                        nodes.push({ id: "Active Agent Thread", group: 3 });
+                        links.push({ source: "Core Kernel", target: "Active Agent Thread" });
+                    }
+
+                    this.svg.selectAll("*").remove();
+
+                    const link = this.svg.append("g")
+                        .attr("class", "links")
+                        .selectAll("line")
+                        .data(links)
+                        .enter().append("line")
+                        .attr("class", "link");
+
+                    const node = this.svg.append("g")
+                        .attr("class", "nodes")
+                        .selectAll("g")
+                        .data(nodes)
+                        .enter().append("g");
+
+                    node.append("circle")
+                        .attr("r", d => d.group === 1 ? 15 : 8)
+                        .attr("fill", d => d.group === 1 ? "#3b82f6" : d.group === 2 ? "#10b981" : "#8b5cf6");
+
+                    node.append("text")
+                        .text(d => d.id)
+                        .attr("x", 12)
+                        .attr("y", 3);
+
+                    this.simulation.nodes(nodes).on("tick", () => {
+                        link.attr("x1", d => d.source.x)
+                            .attr("y1", d => d.source.y)
+                            .attr("x2", d => d.target.x)
+                            .attr("y2", d => d.target.y);
+                        node.attr("transform", d => `translate(${d.x},${d.y})`);
+                    });
+
+                    this.simulation.force("link").links(links);
+                    this.simulation.alpha(0.3).restart();
+                }
+            },
+            watch: {
+                currentTab(newTab) {
+                    if(newTab === 'topology') {
+                        setTimeout(() => this.updateTopologyData(), 200); // delay for DOM render
+                    }
+                }
+            }
+        }).mount('#app');
+        });
+    </script>
+</body>
+</html>

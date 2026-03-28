@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antigravity Prime | Dashboard Control</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Unified Header -->
+        <header>
+            <div class="logo-cluster">
+                <div class="logo-badge">Λ</div>
+                <div class="logo-text">Antigravity Prime</div>
+            </div>
+            <div class="top-telemetry">
+                <div class="tele-item">
+                    <span class="tele-label">Mesh Status</span>
+                    <span class="tele-val mono" id="tele-mesh">0 UNITS</span>
+                </div>
+                <div class="tele-item">
+                    <span class="tele-label">Uptime</span>
+                    <span class="tele-val mono" id="tele-uptime">00:00:00</span>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-workbench">
+            <!-- Left Sidebar: Analytics -->
+            <aside class="glass-panel">
+                <div class="panel-header">
+                    <span class="panel-title">Mesh Pulse</span>
+                    <span class="tag success mono">LIVE</span>
+                </div>
+                <div class="card-value mono" id="ui-mesh-val" style="font-size:1.5rem; margin-bottom:1rem;">0 Peer Nodes</div>
+                <div class="tele-label">Hub Latency: <span id="ui-hub-time" class="tele-val">~0ms</span></div>
+                
+                <div class="panel-header" style="margin-top:2rem;">
+                    <span class="panel-title">Swarm Clusters</span>
+                </div>
+                <div id="ui-clusters" style="display:flex; flex-direction:column; gap:0.5rem;">
+                    <div style="opacity:0.5; font-size:0.75rem;">Initializing clusters...</div>
+                </div>
+            </aside>
+
+            <!-- Center: Mission Feed -->
+            <section class="glass-panel">
+                <div class="panel-header">
+                    <span class="panel-title">Mission Feed</span>
+                    <span class="tag mono" id="ui-tasks-val">0 ACTIVE</span>
+                </div>
+                <div class="mission-grid" id="ui-mission-grid">
+                    <!-- Missions here -->
+                </div>
+            </section>
+
+            <!-- Right Sidebar: Reasoning Stream -->
+            <aside class="glass-panel">
+                <div class="panel-header">
+                    <span class="panel-title">Reasoning Stream</span>
+                    <div class="pulse" style="width:8px; height:8px; border-radius:50%; background:var(--primary);"></div>
+                </div>
+                <div class="thought-stream" id="ui-thought-stream">
+                    <!-- Reasoning here -->
+                </div>
+            </aside>
+        </main>
+
+        <!-- Command Input -->
+        <footer class="command-container">
+            <div class="command-bar">
+                <input type="text" id="ui-input" placeholder="Inject high-level directive..." autocomplete="off">
+                <button class="command-btn" onclick="dispatchDirective()">Dispatch</button>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Same core logic as spatial UI -->
+    <script type="module">
+        import { spatialEngine } from './spatial_engine.js';
+        // Even in 2D dashboard, we keep the engine for background data consistency
+        import './app.js';
+    </script>
+</body>
+</html>
+
