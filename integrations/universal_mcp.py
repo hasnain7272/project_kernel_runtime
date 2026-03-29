@@ -65,12 +65,9 @@ class UniversalMCP:
                     if not tools and "tools" in manifest and isinstance(manifest["tools"], list):
                          tools = manifest["tools"] # Fallback for simpler schemas
                 else:
-                    # Fallback for FastMCP /sse style if no manifest found
+                    # Fallback for generic SSE endpoints
                     state_hub.record_thought("MCP_Bridge", "Discovery", f"No manifest found at {url}. Attempting generic capability mapping...")
-                    server_id = "BlenderMCP" if "8111" in url else f"mcp_{len(self.discovered_servers)}"
-                    # Injects common tools if we are sure it's a known service
-                    if "8111" in url:
-                        tools = ["render_animation", "setup_lighting", "import_asset", "get_scene_hierarchy"]
+                    server_id = f"mcp_{len(self.discovered_servers)}"
 
                 if server_id:
                     self.discovered_servers[server_id] = {
@@ -88,24 +85,13 @@ class UniversalMCP:
                     return True
         except Exception as e:
             state_hub.record_thought("MCP_Bridge", "Discovery", f"Failed to reach MCP at {url}: {str(e)}")
-            # Fallback to a simpler probe for common FastMCP ports
-            if "8111" in url:
-                state_hub.record_thought("MCP_Bridge", "Discovery", "Detected common Blender port. Attempting manual tool injection...")
-                self.discovered_servers["BlenderMCP"] = {
-                    "url": url,
-                    "tools": ["render_animation", "setup_lighting", "import_asset"],
-                    "type": "local"
-                }
-                for tool in self.discovered_servers["BlenderMCP"]["tools"]:
-                    self.tool_map[tool] = "BlenderMCP"
-                return True
-        return False
+            return False
 
     async def initiate_mcp_discovery(self):
         """Background task to discover local and configured MCP servers."""
         state_hub.record_thought("MCP_Bridge", "Discovery", "Starting background discovery loop...")
         # Common local development ports
-        potential_urls = ["http://localhost:8111/mcp", "http://localhost:8080/mcp"]
+        potential_urls = ["http://localhost:8080/mcp"]
         for url in potential_urls:
             await self.add_server(url)
         

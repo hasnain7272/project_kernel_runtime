@@ -213,22 +213,18 @@ class LLMProvider:
             yield f"[Error: Streaming failed: {type(e).__name__}: {str(e)}]"
     
     async def _call_litellm(
-        self,
-        messages: List[LLMMessage],
-        model: str,
-        temperature: float,
-        max_tokens: int,
-        tools: Optional[List[Dict]] = None,
+        self, messages: List[LLMMessage], model: str, temperature: float, max_tokens: int, tools: Optional[List[Dict]] = None,
     ) -> LLMResponse:
         """Call LLM via litellm (supports Ollama, OpenAI, Anthropic, etc.)."""
         try:
             import litellm
         except ImportError:
             # Fallback to basic summarization without litellm
-            from .research import simple_summarize
             content = messages[-1].content if messages else ""
+            # Simple extract: first 500 chars
+            summary = content[:500] + "..." if len(content) > 500 else content
             return LLMResponse(
-                content=simple_summarize(content),
+                content=summary,
                 model=model,
                 provider="builtin",
             )
@@ -415,5 +411,6 @@ def summarize_text(text: str, strategy: str = "default", max_chars: int = 2000) 
         except ImportError:
             pass
     
-    from .research import simple_summarize
-    return simple_summarize(text, max_chars=max_chars)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars//2] + "\n...[truncated]...\n" + text[-max_chars//2:]

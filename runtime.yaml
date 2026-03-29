@@ -1,27 +1,16 @@
-# ============================================================================
-# Antigravity Project Kernel Runtime — Configuration v2.0
-# ============================================================================
-# Schema v2: Fully typed subsections matching Pydantic models in core/runtime.py
-# Environment variables override: PKR_<SECTION>_<KEY>=value
-# ============================================================================
-
-version: "2.0.0"
-api_version: "2026-03"
-mode: "development"
-
-# Deployment modes supported
+version: 2.0.0
+api_version: 2026-03
+mode: development
 modes:
-  - http
-  - cli
-  - mcp
-
-# ── Governance & Security ──
+- http
+- cli
+- mcp
 governance:
   enabled: true
-  default_role: "developer"
+  default_role: developer
   require_approval_for:
-    - git_commit
-    - bash_execute
+  - git_commit
+  - bash_execute
   policy_matrix:
     plan:
       read_only: true
@@ -44,158 +33,128 @@ governance:
       execute: true
       network: true
   network_allowlist:
-    - api.openai.com
-    - api.anthropic.com
-    - pypi.org
-    - registry.npmjs.org
-    - github.com
-    - api.github.com
+  - api.openai.com
+  - api.anthropic.com
+  - pypi.org
+  - registry.npmjs.org
+  - github.com
+  - api.github.com
   audit_log_enabled: true
-  audit_log_path: "./data/audit.db"
+  audit_log_path: ./data/audit.db
   max_tool_timeout_seconds: 300
-  agentrules_filename: ".agentrules"
-
-# ── MCP Protocol ──
+  agentrules_filename: .agentrules
 mcp:
   enabled: true
-  transport: "streamable_http"
-  host: "0.0.0.0"
+  transport: streamable_http
+  host: 0.0.0.0
   port: 8090
   protocol_versions:
-  - "2025-03-26"
-  - "2024-11-05"
+  - '2025-03-26'
+  - '2024-11-05'
   session_timeout_seconds: 3600
   max_sessions: 100
   tools_enabled: true
   resources_enabled: true
   prompts_enabled: true
   sampling_enabled: false
-
-# ── MCP Servers Registry ──
-# Supports any MCP/MCO compatible server
 mcpServers:
-  # Example: Blender MCP server (disabled by default)
-  blender-mcp:
-    command: "C:/BlenderCopilot_venv/Scripts/python.exe"
-    args: ["-m", "blender_mcp_server.server"]
-    env:
-      PYTHONPATH: "d:/AI_Content_Studio/ai_blender_cinematic/antigravity/blender-mcp-server/src/"
-    disabled: true
-    auto_start: false
-    health_check_interval: 30
-    retry_on_failure: true
-    max_retries: 3
-    startup_timeout: 30
-  
-  # Example: Filesystem MCP server (built-in)
   filesystem-mcp:
-    command: "python"
-    args: ["-m", "mcp_server_filesystem"]
-    disabled: true
-    auto_start: false
-  
-  # Example: Web search MCP server
+    command: python
+    args:
+    - -m
+    - mcp_server_filesystem
+    disabled: false
+    auto_start: true
   websearch-mcp:
-    command: "node"
-    args: ["websearch-server.js"]
+    command: node
+    args:
+    - websearch-server.js
     disabled: true
     auto_start: false
-
-# ── Sandbox / Execution Isolation ──
+  filesystem-access:
+    command: npx
+    args:
+    - -y
+    - '@modelcontextprotocol/server-filesystem'
+    - ./workspace
+    disabled: false
+    auto_start: true
+    env: {}
 sandbox:
-  backend: "subprocess"
-  docker_image: "python:3.11-slim"
+  backend: subprocess
+  docker_image: python:3.11-slim
   memory_limit_mb: 512
   cpu_limit: 1.0
-  network_mode: "none"
+  network_mode: none
   network_allowlist: []
   timeout_seconds: 300
-  working_dir: "./workspace"
+  working_dir: ./workspace
   max_concurrent_sandboxes: 5
   cleanup_on_exit: true
-
-# ── LLM Providers ──
 llm:
-  active_model: "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
+  active_model: ollama/qwen2.5-coder:7b-instruct-q4_K_M
   providers:
-    - name: "ollama"
-      base_url: "http://127.0.0.1:11500"
-      default_model: "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
-      priority: 0
-      enabled: true
-    - name: "anthropic"
-      api_key_env: "ANTHROPIC_API_KEY"
-      default_model: "claude-sonnet-4-20250514"
-      priority: 1
-      enabled: false
-    - name: "openai"
-      api_key_env: "OPENAI_API_KEY"
-      default_model: "gpt-4o"
-      priority: 2
-      enabled: false
+  - name: ollama
+    base_url: http://127.0.0.1:11500
+    default_model: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+    priority: 0
+    enabled: true
+  - name: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    default_model: claude-sonnet-4-20250514
+    priority: 1
+    enabled: false
+  - name: openai
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o
+    priority: 2
+    enabled: false
   model_router:
-    autocomplete: "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
-    code_generation: "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
-    architecture: "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
-    research: "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
+    autocomplete: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+    code_generation: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+    architecture: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+    research: ollama/qwen2.5-coder:7b-instruct-q4_K_M
   fallback_enabled: false
   max_retries: 3
   rate_limit_rpm: 60
   cost_tracking_enabled: true
-
-# ── Vector DB / Agent Memory ──
 vector_db:
-  backend: "chromadb"
-  persist_dir: "./data/chroma_db"
-  collection_name: "agent_memory"
-  embedding_model: "all-MiniLM-L6-v2"
+  backend: chromadb
+  persist_dir: ./data/chroma_db
+  collection_name: agent_memory
+  embedding_model: all-MiniLM-L6-v2
   max_results: 10
   enable_codebase_rag: true
   rag_chunk_size: 512
   rag_chunk_overlap: 50
-
-# ── A2A (Agent-to-Agent) Protocol ──
 a2a:
   enabled: true
-  agent_name: "Antigravity Kernel"
-  agent_description: "Production-grade AI coding agent kernel"
-  endpoint_url: "http://localhost:8089"
-  version: "0.3"
-  authentication: "api_key"
+  agent_name: Antigravity Kernel
+  agent_description: Production-grade AI coding agent kernel
+  endpoint_url: http://localhost:8089
+  version: '0.3'
+  authentication: api_key
   discoverable: true
-
-# ── Observability ──
 observability:
-  log_level: "INFO"
-  log_format: "json"
+  log_level: INFO
+  log_format: json
   metrics_enabled: true
   metrics_port: 9090
   tracing_enabled: false
   health_check_interval_seconds: 30
-
-# ── Skills Registry ──
 skills:
   core:
-    - file_operations
-    - terminal_execution
-    - git_operations
-    - lsp_integration
-    - error_recovery
-    - browser_automation
-    - web_search
-    - custom_tools
-  domain:
-    - blender
-    - coding
-    - research
+  - file_operations
+  - terminal_execution
+  - git_operations
+  - mcp_client
+  domain: []
   auto_discover: true
-
-# ── Feature Flags ──
 features:
-  gtm_swarm: false
+  gtm_swarm: true
   vision_swarm: false
   federated_hub: false
-  mesh_p2p: false
+  mesh_p2p: true
   sre_swarm: true
   credits_engine: false
   multi_tenancy: false
@@ -203,23 +162,17 @@ features:
   predictive: true
   wasm_driver: false
   self_attention: true
-
-# ── HTTP Server ──
 server:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8089
   cors_origins:
-    - "*"
-  api_key_header: "X-API-Key"
+  - '*'
+  api_key_header: X-API-Key
   rate_limit_enabled: true
   rate_limit_per_minute: 120
-  static_files_dir: "ui/web"
-
-# Workspace adapters
+  static_files_dir: ui/web
 workspace_adapters:
-  - local
-  - git_worktree
-  - containerized
-
-# Data persistence directory
-data_dir: "./data"
+- local
+- git_worktree
+- containerized
+data_dir: ./data

@@ -1,413 +1,306 @@
-/**
- * Antigravity Prime - Mission Control UI
- * Simplified, clean UI inspired by OpenCode/Codex
- */
+function kernelUI() {
+  const marketplaceList = [
+    { name: "SQLite Database", desc: "Interact directly with SQLite .db files for agent memory.", cmd: "npx -y @modelcontextprotocol/server-sqlite", command: "npx", args: ["-y", "@modelcontextprotocol/server-sqlite", "--db", "./data/mcp.db"] },
+    { name: "Filesystem Access", desc: "Robust local drive operations.", cmd: "npx -y @modelcontextprotocol/server-filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"] },
+    { name: "Brave Search", desc: "Grants internet crawling and web research capabilities.", cmd: "npx -y @modelcontextprotocol/server-brave-search", command: "npx", args: ["-y", "@modelcontextprotocol/server-brave-search"] },
+    { name: "GitHub Connector", desc: "Manage repos, PRs, and issues directly.", cmd: "npx -y @modelcontextprotocol/server-github", command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] }
+  ];
 
-// Configuration
-const CONFIG = {
-    apiEndpoint: '/api',
-    wsEndpoint: `ws://${window.location.host}/ws/ui`
-};
+  return {
+    vantaEffect: null,
+    rightTab: "toolbox",
+    activeModel: "ollama/qwen2.5-coder:7b-instruct-q4_K_M",
+    loadedSessions: [],
+    activeSession: null,
+    chatLog: [],
+    userInput: "",
+    isExecuting: false,
+    pollInterval: null,
+    globalFolders: ["./workspace"],
+    sysConfig: { mesh_p2p: false, gtm_swarm: false, sre_swarm: false },
+    apiKeys: { anthropic: "", openai: "" },
+    newMcp: { name: "", command: "", args: "" },
+    newFolder: "",
+    newSkillDesc: "",
+    sortables: {},
+    marketplaceList,
 
-// State
-const state = {
-    schema: null,
-    parameters: {},
-    selectedCategory: 'llm',
-    activeTab: 'parameters',
-    sessions: [],
-    currentSession: null,
-    isConnected: false,
-    uptimeStart: Date.now()
-};
+    async api(url, options = {}) {
+      const res = await fetch(url, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `${res.status} ${res.statusText}`);
+      }
+      if (res.status === 204) return null;
+      return res.json();
+    },
 
-// Initialize
-document.addEventListener('DOMContentLoaded', init);
+    async initEngine() {
+      this.vantaEffect = VANTA.FOG({
+        el: "#vanta-canvas",
+        mouseControls: true,
+        touchControls: true,
+        blurFactor: 0.6,
+        zoom: 1.5,
+        baseColor: 0x0a0c10,
+        highlightColor: 0x3fb950,
+        midtoneColor: 0x243e8a,
+        lowlightColor: 0x0E1116
+      });
+      await this.fetchState();
+      this.$nextTick(() => lucide.createIcons());
+    },
 
-async function init() {
-    console.log('[App] Starting...');
-    
-    try {
-        await Promise.all([fetchSchema(), fetchParameters(), fetchSessions()]);
-        initUI();
-        updateConnectionStatus(true);
-        showToast('Connected', 'success');
-    } catch (e) {
-        console.error('[App] Init failed:', e);
-        loadDemoData();
-        updateConnectionStatus(false);
-        showToast('Demo mode', 'warning');
-    }
-    
-    setInterval(updateUptime, 1000);
-}
+    async fetchState() {
+      try {
+        const data = await this.api("/api/ui/bootstrap");
+        this.loadedSessions = data.sessions || [];
+        this.activeModel = data.active_model || this.activeModel;
+        this.sysConfig = data.features || this.sysConfig;
 
-// API Functions
-async function fetchSchema() {
-    const res = await fetch(`${CONFIG.apiEndpoint}/ui-schema`);
-    state.schema = await res.json();
-}
+        const skills = (data.skills && data.skills.available_packs) || ["file_operations", "terminal_execution"];
+        const mcps = Object.keys(data.mcp_registry || {});
+        this.renderModelOptions(data.models || []);
+        this.renderDraggables("source-skills", skills, "zap", "text-yellow-500");
+        this.renderDraggables("source-mcps", mcps, "server", "text-primary");
+        this.renderDraggables("source-folders", this.globalFolders, "folder-search", "text-accent");
 
-async function fetchParameters() {
-    const res = await fetch(`${CONFIG.apiEndpoint}/params`);
-    state.parameters = await res.json();
-}
-
-async function fetchSessions() {
-    try {
-        const res = await fetch(`${CONFIG.apiEndpoint}/sessions`);
-        const data = await res.json();
-        state.sessions = data.sessions || [];
-        if (state.sessions.length > 0) {
-            state.currentSession = state.sessions[0];
+        if (this.activeSession) {
+          const refreshed = this.loadedSessions.find(s => (s.id || s.session_id) === (this.activeSession.id || this.activeSession.session_id));
+          if (refreshed) {
+            this.activeSession = refreshed;
+          }
         }
-    } catch (e) {
-        state.sessions = [{id: 'default', name: 'Default', active: true}];
-        state.currentSession = state.sessions[0];
-    }
-}
+      } catch (e) {
+        console.error("API sync failure. Restart FastAPI backend.", e);
+      }
+    },
 
-// UI Initialization
-function initUI() {
-    renderSidebar();
-    renderWorkbench();
-    renderStatusBar();
-    setupEventListeners();
-}
+    renderModelOptions(models) {
+      const selectEl = document.querySelector('select[x-model="activeModel"]');
+      if (!selectEl || !models.length) return;
+      selectEl.innerHTML = "";
+      models.forEach(model => {
+        const opt = document.createElement("option");
+        opt.value = model.id;
+        opt.textContent = `[${model.group}] ${model.name}`;
+        selectEl.appendChild(opt);
+      });
+    },
 
-function renderSidebar() {
-    const sidebar = document.getElementById('sidebar');
-    if (!sidebar) return;
-    
-    const categories = state.schema?.categories || [];
-    const categoryHtml = categories.map(cat => `
-        <div class="nav-item ${cat.id === state.selectedCategory ? 'active' : ''}" data-category="${cat.id}">
-            <span class="nav-icon">${getIcon(cat.id)}</span>
-            <span class="nav-label">${cat.label}</span>
-            <span class="nav-count">${cat.parameters?.length || 0}</span>
-        </div>
-    `).join('');
-    
-    sidebar.innerHTML = `
-        <div class="sidebar-header">
-            <div class="logo">
-                <span class="logo-icon">Λ</span>
-                <span class="logo-text">Antigravity</span>
-            </div>
-        </div>
-        <div class="sidebar-section">
-            <div class="section-title">Categories</div>
-            <div class="nav-list">${categoryHtml}</div>
-        </div>
-        <div class="sidebar-section">
-            <div class="section-title">Sessions</div>
-            <div class="session-list">
-                ${state.sessions.map(s => `
-                    <div class="session-item ${s.active ? 'active' : ''}" data-session="${s.id}">
-                        <span class="session-dot"></span>
-                        <span class="session-name">${s.name}</span>
-                    </div>
-                `).join('')}
-                <button class="new-session-btn" onclick="createSession()">+ New Session</button>
-            </div>
-        </div>
-    `;
-    
-    // Add click handlers
-    sidebar.querySelectorAll('.nav-item').forEach(item => {
-        item.addEventListener('click', () => {
-            state.selectedCategory = item.dataset.category;
-            renderSidebar();
-            renderContent();
+    renderDraggables(containerId, items, icon, colorClass) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      container.innerHTML = "";
+      items.forEach(value => {
+        const div = document.createElement("div");
+        div.className = "bg-base-200 px-3 py-2 rounded shadow-sm text-xs cursor-grab flex items-center gap-2 border border-transparent hover:border-white/10";
+        div.dataset.id = value;
+        div.innerHTML = `<i data-lucide="${icon}" class="w-3 h-3 ${colorClass}"></i><span class="truncate">${value}</span>`;
+        container.appendChild(div);
+      });
+      lucide.createIcons();
+    },
+
+    async patchModelConfig() {
+      try {
+        await this.api("/api/models/status", {
+          method: "PUT",
+          body: JSON.stringify({
+            active_model: this.activeModel,
+            providers: [
+              { name: "anthropic", api_key_env: this.apiKeys.anthropic },
+              { name: "openai", api_key_env: this.apiKeys.openai }
+            ]
+          })
         });
-    });
-}
+      } catch (e) {
+        console.error(e);
+      }
+    },
 
-function renderContent() {
-    const content = document.getElementById('content');
-    if (!content || !state.schema) return;
-    
-    const category = state.schema.categories.find(c => c.id === state.selectedCategory);
-    if (!category) return;
-    
-    const paramsHtml = category.parameters.map(p => renderParameter(p)).join('');
-    
-    content.innerHTML = `
-        <div class="content-header">
-            <h2>${category.label}</h2>
-            <span class="param-count">${category.parameters.length} parameters</span>
-        </div>
-        <div class="params-grid">${paramsHtml}</div>
-    `;
-}
+    async patchSystemConfig(key) {
+      try {
+        await this.api("/api/runtime/config", {
+          method: "PATCH",
+          body: JSON.stringify({ features: { [key]: this.sysConfig[key] } })
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    },
 
-function renderParameter(param) {
-    const value = state.parameters[param.id] ?? param.default;
-    const displayValue = formatValue(value);
-    
-    let controlHtml = '';
-    
-    if (param.type === 'boolean') {
-        controlHtml = `
-            <label class="toggle">
-                <input type="checkbox" ${value ? 'checked' : ''} 
-                    onchange="updateParam('${param.id}', this.checked)">
-                <span class="toggle-slider"></span>
-            </label>
-        `;
-    } else if (param.type === 'slider' || typeof value === 'number') {
-        const min = param.min ?? 0;
-        const max = param.max ?? 100;
-        controlHtml = `
-            <div class="slider-container">
-                <input type="range" min="${min}" max="${max}" value="${value}"
-                    oninput="this.nextElementSibling.textContent = this.value"
-                    onchange="updateParam('${param.id}', parseFloat(this.value))">
-                <span class="slider-value">${value}</span>
-            </div>
-        `;
-    } else if (Array.isArray(value)) {
-        controlHtml = `<div class="array-display">${value.length} items</div>`;
-    } else if (typeof value === 'object') {
-        controlHtml = `<div class="object-display">{...}</div>`;
-    } else {
-        controlHtml = `
-            <input type="text" value="${escapeHtml(String(value))}" 
-                onchange="updateParam('${param.id}', this.value)"
-                class="text-input">
-        `;
-    }
-    
-    return `
-        <div class="param-card">
-            <div class="param-header">
-                <span class="param-label">${param.label}</span>
-                <span class="param-id">${param.id}</span>
-            </div>
-            <div class="param-control">${controlHtml}</div>
-            <div class="param-desc">${param.description || ''}</div>
-        </div>
-    `;
-}
+    async createSession() {
+      const uid = prompt("Assign Name for new Focus Node:");
+      if (!uid) return;
+      try {
+        const session = await this.api("/api/sessions", {
+          method: "POST",
+          body: JSON.stringify({ user_id: uid, workspace_path: "./workspace", mode: "web" })
+        });
+        await this.fetchState();
+        const created = this.loadedSessions.find(s => (s.id || s.session_id) === session.id) || session;
+        await this.switchSession(created);
+      } catch (e) {
+        alert("Failed to forge session.");
+      }
+    },
 
-function renderWorkbench() {
-    const workbench = document.getElementById('workbench');
-    if (!workbench) return;
-    
-    workbench.innerHTML = `
-        <div class="workbench-header">
-            <h3>Task Input</h3>
-        </div>
-        <div class="workbench-input">
-            <textarea id="taskInput" placeholder="Describe what you want to build or fix..." rows="4"></textarea>
-            <div class="input-actions">
-                <button class="btn-secondary" onclick="clearOutput()">Clear</button>
-                <button class="btn-primary" onclick="executeTask()">Run</button>
-            </div>
-        </div>
-        <div class="workbench-output">
-            <div class="output-header">
-                <span>Output</span>
-                <span class="output-status" id="outputStatus">Ready</span>
-            </div>
-            <pre id="outputContent"><code>Output will appear here...</code></pre>
-        </div>
-    `;
-}
-
-function renderStatusBar() {
-    const statusbar = document.getElementById('statusbar');
-    if (!statusbar) return;
-    
-    statusbar.innerHTML = `
-        <div class="status-left">
-            <span class="status-item">
-                <span class="status-dot" id="connectionDot"></span>
-                <span id="connectionText">Connected</span>
-            </span>
-            <span class="status-item">
-                <span class="status-label">Session:</span>
-                <span id="sessionName">${state.currentSession?.name || 'Default'}</span>
-            </span>
-        </div>
-        <div class="status-right">
-            <span class="status-item">
-                <span class="status-label">Uptime:</span>
-                <span id="uptime">00:00:00</span>
-            </span>
-            <span class="status-item">
-                <span class="status-label">Params:</span>
-                <span>${Object.keys(state.parameters).length}</span>
-            </span>
-        </div>
-    `;
-}
-
-// Event Handlers
-function setupEventListeners() {
-    document.getElementById('taskInput')?.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            executeTask();
+    async deleteSession(id) {
+      try {
+        await this.api(`/sessions/${id}`, { method: "DELETE" });
+        if (this.activeSession && (this.activeSession.id || this.activeSession.session_id) === id) {
+          this.activeSession = null;
+          this.chatLog = [];
+          this.isExecuting = false;
+          if (this.pollInterval) clearInterval(this.pollInterval);
         }
-    });
-}
+        await this.fetchState();
+      } catch (e) {
+        console.error(e);
+      }
+    },
 
-async function updateParam(id, value) {
-    try {
-        await fetch(`${CONFIG.apiEndpoint}/params/${id}`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(value)
+    async switchSession(session) {
+      this.activeSession = { ...session, skills: session.skills || [], mcp_servers: session.mcp_servers || [], folders: session.folders || [] };
+      this.renderDraggables("drop-skills", this.activeSession.skills, "zap", "text-yellow-500");
+      this.renderDraggables("drop-mcps", this.activeSession.mcp_servers, "server", "text-primary");
+      this.renderDraggables("drop-folders", this.activeSession.folders, "folder", "text-accent");
+      await this.pollHistory();
+      this.scrollToBottom();
+      this.$nextTick(() => this.rebindDragAndDrop());
+      if (this.pollInterval) clearInterval(this.pollInterval);
+      this.pollInterval = setInterval(() => this.pollHistory(), 1500);
+    },
+
+    async pollHistory() {
+      if (!this.activeSession) return;
+      const sid = this.activeSession.id || this.activeSession.session_id;
+      try {
+        const data = await this.api(`/sessions/${sid}/history`);
+        const history = data.history || data.messages || [];
+        if (!Array.isArray(history)) return;
+        if (history.length < this.chatLog.length && this.isExecuting) return;
+        if (JSON.stringify(this.chatLog) !== JSON.stringify(history)) {
+          this.chatLog = history;
+          this.isExecuting = false;
+          this.scrollToBottom();
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    },
+
+    rebindDragAndDrop() {
+      Object.values(this.sortables).forEach(sortable => sortable.destroy());
+      const makeSortable = (group, src, drop) => {
+        const source = document.getElementById(src);
+        const target = document.getElementById(drop);
+        if (!source || !target) return;
+        this.sortables[src] = new Sortable(source, { group: { name: group, pull: "clone", put: false }, sort: false });
+        this.sortables[drop] = new Sortable(target, { group: { name: group, pull: true, put: [group] }, animation: 150 });
+      };
+      makeSortable("group_skills", "source-skills", "drop-skills");
+      makeSortable("group_mcps", "source-mcps", "drop-mcps");
+      makeSortable("group_folders", "source-folders", "drop-folders");
+      document.querySelectorAll(".glass-panel").forEach(block => {
+        block.addEventListener("drop", () => setTimeout(() => lucide.createIcons(), 50));
+      });
+    },
+
+    async saveSessionConstraints() {
+      if (!this.activeSession) return;
+      const ids = node => Array.from(document.getElementById(node).querySelectorAll("[data-id]")).map(el => el.dataset.id);
+      const sid = this.activeSession.id || this.activeSession.session_id;
+      try {
+        const updated = await this.api(`/sessions/${sid}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            skills: Array.from(new Set(ids("drop-skills"))),
+            mcp_servers: Array.from(new Set(ids("drop-mcps"))),
+            folders: Array.from(new Set(ids("drop-folders")))
+          })
         });
-        state.parameters[id] = value;
-        showToast(`Updated ${id}`, 'success');
-    } catch (e) {
-        showToast('Update failed', 'error');
-    }
-}
+        this.activeSession = updated;
+        alert("Constraints permanently serialized!");
+      } catch (e) {
+        console.error(e);
+      }
+    },
 
-async function executeTask() {
-    const input = document.getElementById('taskInput');
-    const output = document.getElementById('outputContent');
-    const status = document.getElementById('outputStatus');
-    
-    if (!input?.value.trim()) {
-        showToast('Enter a task', 'warning');
-        return;
-    }
-    
-    status.textContent = 'Running...';
-    status.className = 'output-status running';
-    
-    try {
-        const res = await fetch('/agent/execute', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({description: input.value})
+    async dispatchTask() {
+      if (!this.userInput || !this.activeSession) return;
+      const q = this.userInput.trim();
+      if (!q) return;
+      this.userInput = "";
+      this.isExecuting = true;
+      this.chatLog = [...this.chatLog, { role: "user", content: q }];
+      this.scrollToBottom();
+
+      const sid = this.activeSession.id || this.activeSession.session_id;
+      try {
+        await this.api("/tasks", {
+          method: "POST",
+          body: JSON.stringify({
+            session_id: sid,
+            task_type: "code_generation",
+            description: q,
+            max_iterations: 8
+          })
         });
-        
-        const data = await res.json();
-        output.querySelector('code').textContent = data.response || data.error || 'No response';
-        status.textContent = 'Complete';
-        status.className = 'output-status success';
-    } catch (e) {
-        output.querySelector('code').textContent = 'Error: ' + e.message;
-        status.textContent = 'Error';
-        status.className = 'output-status error';
-    }
-}
+        await this.pollHistory();
+      } catch (e) {
+        console.error("Pipeline failure.", e);
+        this.isExecuting = false;
+      }
+    },
 
-function clearOutput() {
-    document.getElementById('outputContent').querySelector('code').textContent = 'Output will appear here...';
-    document.getElementById('outputStatus').textContent = 'Ready';
-}
+    addNativeFolder() {
+      document.getElementById("addFolderModal").showModal();
+    },
 
-async function createSession() {
-    const name = prompt('Session name:');
-    if (!name) return;
-    
-    try {
-        await fetch(`${CONFIG.apiEndpoint}/sessions`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({name})
+    registerLocalFolder() {
+      if (!this.newFolder.trim()) return;
+      if (!this.globalFolders.includes(this.newFolder)) this.globalFolders.push(this.newFolder);
+      this.renderDraggables("source-folders", this.globalFolders, "folder-search", "text-accent");
+      document.getElementById("addFolderModal").close();
+      this.newFolder = "";
+    },
+
+    async registerNewMCP() {
+      const args = this.newMcp.args.split(",").map(item => item.trim()).filter(Boolean);
+      await this.executeMcpInstall(this.newMcp.name, this.newMcp.command, args);
+      document.getElementById("addMcpModal").close();
+      this.newMcp = { name: "", command: "", args: "" };
+    },
+
+    async oneClickInstall(item) {
+      await this.executeMcpInstall(item.name.replace(/\s+/g, "-").toLowerCase(), item.command, item.args);
+    },
+
+    async executeMcpInstall(name, command, args) {
+      try {
+        await this.api("/api/mcp/registry", {
+          method: "POST",
+          body: JSON.stringify({ name, command, args, auto_start: true })
         });
-        await fetchSessions();
-        renderSidebar();
-        showToast('Session created', 'success');
-    } catch (e) {
-        showToast('Failed to create session', 'error');
+        await this.fetchState();
+        alert(`MCP [${name}] merged into registry.`);
+      } catch (e) {
+        console.error(e);
+      }
+    },
+
+    scrollToBottom() {
+      setTimeout(() => {
+        const box = document.getElementById("chatArea");
+        if (box) box.scrollTop = box.scrollHeight;
+      }, 100);
     }
+  };
 }
 
-// Utilities
-function formatValue(value) {
-    if (Array.isArray(value)) return `[${value.length} items]`;
-    if (typeof value === 'object' && value !== null) return '{...}';
-    return String(value);
-}
-
-function escapeHtml(str) {
-    return str.replace(/[&<>"']/g, c => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[c]));
-}
-
-function getIcon(id) {
-    const icons = {
-        llm: '🧠', sandbox: '📦', governance: '🛡️', mcp: '🔗',
-        a2a: '🌐', server: '🖥️', observability: '📊', features: '⚡',
-        vector_db: '💾', skills: '🎯', general: '⚙️'
-    };
-    return icons[id] || '📌';
-}
-
-function updateConnectionStatus(connected) {
-    const dot = document.getElementById('connectionDot');
-    const text = document.getElementById('connectionText');
-    if (dot) dot.className = connected ? 'status-dot connected' : 'status-dot';
-    if (text) text.textContent = connected ? 'Connected' : 'Disconnected';
-}
-
-function updateUptime() {
-    const elapsed = Date.now() - state.uptimeStart;
-    const h = Math.floor(elapsed / 3600000);
-    const m = Math.floor((elapsed % 3600000) / 60000);
-    const s = Math.floor((elapsed % 60000) / 1000);
-    const el = document.getElementById('uptime');
-    if (el) {
-        el.textContent = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    }
-}
-
-function showToast(message, type = 'info') {
-    const container = document.getElementById('toasts') || (() => {
-        const el = document.createElement('div');
-        el.id = 'toasts';
-        el.className = 'toast-container';
-        document.body.appendChild(el);
-        return el;
-    })();
-    
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.textContent = message;
-    container.appendChild(toast);
-    
-    setTimeout(() => toast.remove(), 3000);
-}
-
-function loadDemoData() {
-    state.schema = {
-        categories: [
-            {id: 'llm', label: 'LLM & Models', parameters: [
-                {id: 'llm.model', label: 'Model', type: 'text', default: 'qwen2.5-coder'},
-                {id: 'llm.temperature', label: 'Temperature', type: 'slider', default: 0.7, min: 0, max: 2},
-                {id: 'llm.max_tokens', label: 'Max Tokens', type: 'slider', default: 4096, min: 100, max: 128000}
-            ]},
-            {id: 'sandbox', label: 'Sandbox', parameters: [
-                {id: 'sandbox.timeout', label: 'Timeout (s)', type: 'slider', default: 300, min: 1, max: 3600},
-                {id: 'sandbox.memory_mb', label: 'Memory (MB)', type: 'slider', default: 512, min: 64, max: 8192}
-            ]},
-            {id: 'mcp', label: 'MCP Servers', parameters: [
-                {id: 'mcp.enabled', label: 'MCP Enabled', type: 'boolean', default: true}
-            ]}
-        ]
-    };
-    
-    state.parameters = {
-        'llm.model': 'qwen2.5-coder',
-        'llm.temperature': 0.7,
-        'llm.max_tokens': 4096,
-        'sandbox.timeout': 300,
-        'sandbox.memory_mb': 512,
-        'mcp.enabled': true
-    };
-    
-    state.sessions = [{id: 'default', name: 'Default', active: true}];
-    state.currentSession = state.sessions[0];
-    
-    renderSidebar();
-    renderWorkbench();
-    renderStatusBar();
-}
+window.kernelUI = kernelUI;

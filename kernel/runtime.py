@@ -183,7 +183,7 @@ class SkillsConfig(BaseModel):
         ]
     )
     domain: List[str] = Field(
-        default_factory=lambda: ["blender", "coding", "research"]
+        default_factory=lambda: ["coding", "research"]
     )
     auto_discover: bool = True
 

@@ -6,7 +6,7 @@ Inspired by OpenHands REST API + Cursor web interface
 
 from fastapi import FastAPI, WebSocket, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import uvicorn
 import json
 from typing import List, Dict, Any, Optional
@@ -32,6 +32,17 @@ from project_kernel_runtime.memory.state_hub import state_hub
 
 # Global orchestrator instance
 orchestrator = None
+
+
+def _default_model_catalog():
+    return [
+        {"id": "anthropic/claude-3-5-sonnet-20241022", "name": "Anthropic (Claude 3.5 Sonnet)", "group": "Cloud"},
+        {"id": "anthropic/claude-3-haiku-20240307", "name": "Anthropic (Claude 3 Haiku)", "group": "Cloud"},
+        {"id": "openai/gpt-4o", "name": "OpenAI (GPT-4o)", "group": "Cloud"},
+        {"id": "openai/gpt-4o-mini", "name": "OpenAI (GPT-4o Mini)", "group": "Cloud"},
+        {"id": "google/gemini-2.5-pro", "name": "Google (Gemini 2.5 Pro)", "group": "Cloud"},
+        {"id": "google/gemini-2.5-flash", "name": "Google (Gemini 2.5 Flash)", "group": "Cloud"},
+    ]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,8 +80,10 @@ import os
 app.include_router(research_router, prefix="/research")
 from project_kernel_runtime.services.router_agent import router as agent_router
 from project_kernel_runtime.services.router_mcp import router as mcp_router
+from project_kernel_runtime.services.router_runtime import router as runtime_router
 app.include_router(agent_router)
 app.include_router(mcp_router)
+app.include_router(runtime_router)
 
 # 2. UI WebSocket for Dynamic Control Panel
 @app.websocket("/ws/ui")
@@ -154,6 +167,58 @@ async def get_ui_schema():
         "total_parameters": len(params)
     }
 
+
+@app.get("/api/ui/bootstrap")
+async def get_ui_bootstrap():
+    """Aggregate the main UI bootstrap state in one request."""
+    import yaml
+    from pathlib import Path
+
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    config = {}
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+
+    sessions = []
+    models = _default_model_catalog()
+    if orchestrator:
+        sessions = [
+            {
+                "id": session.session_id,
+                "session_id": session.session_id,
+                "user_id": session.user_id,
+                "workspace_path": session.workspace_path,
+                "mode": session.mode,
+                "skills": getattr(session, "skills", []),
+                "mcp_servers": getattr(session, "mcp_servers", []),
+                "folders": getattr(session, "folders", []),
+                "active": session.is_active,
+                "created_at": session.created_at.isoformat(),
+                "last_active": session.last_active.isoformat(),
+            }
+            for session in orchestrator.sessions.sessions.values()
+        ]
+        try:
+            models = await get_available_models()
+        except Exception:
+            models = _default_model_catalog()
+
+    skills_cfg = config.get("skills", {})
+    return {
+        "sessions": sessions,
+        "models": models,
+        "active_model": getattr(getattr(orchestrator, "llm", None), "active_model", config.get("llm", {}).get("active_model", "")),
+        "features": config.get("features", {}),
+        "skills": {
+            "available_packs": skills_cfg.get("core", []) + skills_cfg.get("domain", []),
+            "core": skills_cfg.get("core", []),
+            "domain": skills_cfg.get("domain", []),
+        },
+        "mcp_registry": config.get("mcpServers", {}),
+        "runtime_yaml_available": config_path.exists(),
+    }
+
 # 4. API endpoint to get/set parameters (standalone)
 @app.get("/api/params")
 async def get_all_params():
@@ -229,11 +294,37 @@ async def set_param(param_id: str, value: Any):
     
     return {"success": True, "param_id": param_id, "value": value}
 
+
+@app.get("/api/runtime/yaml")
+async def get_runtime_yaml():
+    from pathlib import Path
+
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    if not config_path.exists():
+        return {"yaml": ""}
+    return {"yaml": config_path.read_text(encoding="utf-8")}
+
+
+@app.put("/api/runtime/yaml")
+async def set_runtime_yaml(request: Dict[str, Any]):
+    import yaml
+    from pathlib import Path
+
+    content = request.get("yaml", "")
+    try:
+        yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML Syntax: {exc}")
+
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
+    config_path.write_text(content, encoding="utf-8")
+    return {"status": "success"}
+
 # 2. Static Dashboard
 ui_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "ui", "web"))
 if os.path.exists(ui_dir):
     app.mount("/ui", StaticFiles(directory=ui_dir), name="ui")
-    print(f"UI Static Hub: {os.path.join(ui_dir, 'spatial_ui.html')} is READY")
+    print(f"UI Static Hub: {os.path.join(ui_dir, 'index.html')} is READY")
 else:
     print(f"ERROR: UI dir missing at {ui_dir}")
 
@@ -241,6 +332,11 @@ else:
 @app.get("/ui")
 async def root_redirect():
     return RedirectResponse(url="/ui/index.html")
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 # MCP Registry endpoints
 @app.get("/api/mcp/servers")
@@ -280,58 +376,119 @@ async def get_mcp_server_status(name: str):
 @app.get("/api/a2a/peers")
 async def list_a2a_peers():
     """List all A2A peers."""
-    from project_kernel_runtime.integrations.a2a_protocol import GA2AMeshV2
-    mesh = GA2AMeshV2()
-    return {"peers": [], "status": "A2A v0.3 protocol ready"}
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    peers = [peer.to_dict() for peer in orchestrator.mesh_p2p.discover_peers()]
+    return {
+        "peers": peers,
+        "mesh": orchestrator.mesh_p2p.get_mesh_status(),
+        "protocol_version": getattr(getattr(orchestrator.config, "a2a", None), "version", "0.3"),
+    }
 
 @app.get("/api/a2a/status")
 async def get_a2a_status():
     """Get A2A mesh status."""
+    if not orchestrator:
+        return {"status": "initializing"}
+    mesh = orchestrator.mesh_p2p.get_mesh_status()
     return {
-        "protocol_version": "0.3",
+        "protocol_version": getattr(getattr(orchestrator.config, "a2a", None), "version", "0.3"),
         "status": "ready",
-        "peers": 0,
-        "pending_tasks": 0
+        "peers": mesh["total_peers"],
+        "healthy_peers": mesh["healthy"],
+        "stale_peers": mesh["stale"],
     }
 
 @app.post("/api/a2a/delegate")
 async def delegate_a2a_task(request: Dict):
     """Delegate a task to another agent."""
-    from project_kernel_runtime.integrations.a2a_protocol import A2AHandler
-    # A2A task delegation via protocol handler
-    return {"task_id": str(uuid.uuid4()), "status": "delegated"}
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    from uuid import uuid4
+
+    task_id = f"a2a_{uuid4().hex[:8]}"
+    target_peer = request.get("target_peer")
+    description = request.get("description", "")
+    available_peers = [peer.to_dict() for peer in orchestrator.mesh_p2p.discover_peers()]
+
+    state_hub.update_task_state(task_id, "queued", {
+        "target_peer": target_peer,
+        "description": description,
+    })
+    await orchestrator.event_bus.emit_and_publish(
+        "a2a.task.delegated",
+        {
+            "task_id": task_id,
+            "target_peer": target_peer,
+            "description": description,
+        },
+        source="fastapi",
+        task_id=task_id,
+    )
+    return {"task_id": task_id, "status": "queued", "available_peers": available_peers}
 
 # Governance endpoints
 @app.get("/api/governance/status")
 async def get_governance_status():
     """Get governance status."""
+    if not orchestrator:
+        return {"status": "initializing"}
     return {
-        "enabled": True,
-        "default_role": "developer",
-        "audit_enabled": True,
+        "enabled": getattr(getattr(orchestrator.config, "governance", None), "enabled", True),
+        "default_role": getattr(getattr(orchestrator.config, "governance", None), "default_role", "developer"),
+        "audit_enabled": getattr(getattr(orchestrator.config, "governance", None), "audit_log_enabled", True),
         "pending_approvals": 0
     }
 
 @app.get("/api/governance/audit")
 async def get_governance_audit(limit: int = 100):
     """Get governance audit log."""
-    from project_kernel_runtime.kernel.governance import GovernanceEngine
-    engine = GovernanceEngine()
-    entries = engine.get_audit_log(limit=limit)
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    entries = orchestrator.governance.get_audit_log(limit=limit)
     return {"entries": entries}
 
 @app.get("/api/sessions")
 async def list_sessions():
     """List all sessions."""
-    return {"sessions": [
-        {"id": "default", "name": "Default Session", "active": True, "created_at": "now"}
-    ]}
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    sessions = []
+    for session in orchestrator.sessions.sessions.values():
+        sessions.append({
+            "id": session.session_id,
+            "user_id": session.user_id,
+            "workspace_path": session.workspace_path,
+            "mode": session.mode,
+            "active": session.is_active,
+            "created_at": session.created_at.isoformat(),
+            "last_active": session.last_active.isoformat(),
+        })
+    return {"sessions": sessions}
 
 @app.post("/api/sessions")
 async def create_session(request: Dict):
     """Create a new session."""
-    name = request.get("name", "New Session")
-    return {"id": str(uuid.uuid4()), "name": name, "status": "created"}
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    user_id = request.get("user_id")
+    workspace_path = request.get("workspace_path")
+    mode = request.get("mode", "api")
+
+    if not user_id or not workspace_path:
+        raise HTTPException(status_code=400, detail="user_id and workspace_path required")
+
+    session = await orchestrator.start_session(user_id, workspace_path, mode)
+    return {
+        "id": session.session_id,
+        "user_id": session.user_id,
+        "workspace_path": session.workspace_path,
+        "mode": session.mode,
+        "status": "created",
+    }
 
 # WebSocket connections
 
@@ -645,9 +802,11 @@ async def global_exception_handler(request, exc):
 
     )
 
-def run_server(host: str = "0.0.0.0", port: int = 8089):
+def run_server(host: str = "0.0.0.0", port: int = 8089, reload: Optional[bool] = None):
 
     """Run the FastAPI server"""
+    if reload is None:
+        reload = os.environ.get("PKR_RELOAD", "").lower() in {"1", "true", "yes"}
 
     uvicorn.run(
 
@@ -657,7 +816,7 @@ def run_server(host: str = "0.0.0.0", port: int = 8089):
 
         port=port,
 
-        reload=True
+        reload=reload
 
     )
 

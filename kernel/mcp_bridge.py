@@ -14,11 +14,13 @@ import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "mcp_registry.json")
+RUNTIME_YAML_PATH = Path(__file__).resolve().parent.parent / "runtime.yaml"
 
 
 class MCPBridge:
@@ -38,10 +40,13 @@ class MCPBridge:
         logger.info("[MCPBridge] Initialized")
     
     async def boot_permanent_servers(self) -> None:
-        """On startup, read the registry and connect all permanent MCPs."""
+        """On startup, read disk registries and auto-connect configured MCPs."""
         registry = self._read_registry()
+        registry.update(self._read_runtime_registry())
         for name, config in registry.items():
-            if config.get("persistence") == "permanent":
+            if config.get("disabled"):
+                continue
+            if config.get("persistence") == "permanent" or config.get("auto_start"):
                 logger.info(f"[MCPBridge] Auto-connecting permanent MCP: {name}")
                 try:
                     await self.connect(name, config)
@@ -71,10 +76,11 @@ class MCPBridge:
             # Determine the python executable from our venv
             venv_python = sys.executable
             
-            # Parse the command — handle both "python -m ..." and "npx ..." styles
-            parts = command.split()
-            if parts[0] == "python":
-                parts[0] = venv_python
+            args = config.get("args", [])
+            if isinstance(args, str):
+                args = [part for part in args.split() if part]
+            parts = [command, *args]
+            parts = self._normalize_command(parts, venv_python)
             
             logger.info(f"[MCPBridge] Spawning stdio MCP '{name}': {' '.join(parts)}")
             
@@ -84,7 +90,11 @@ class MCPBridge:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=os.path.join(os.path.dirname(__file__), "..", "..", ".."),
-                env={**os.environ, "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "..")},
+                env={
+                    **os.environ,
+                    "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", ".."),
+                    **config.get("env", {}),
+                },
             )
             
             self._connections[name] = {
@@ -100,7 +110,7 @@ class MCPBridge:
             self._connections[name]["tools"] = tools
             
             self.discovered_servers[name] = {
-                "url": f"stdio://{command}",
+                "url": f"stdio://{' '.join(parts)}",
                 "status": "connected",
                 "tools": [t.get("name", "unknown") for t in tools],
                 "type": "stdio",
@@ -156,6 +166,35 @@ class MCPBridge:
                 return False
         except Exception as e:
             logger.error(f"[MCPBridge] WebSocket connection to '{name}' failed: {e}")
+            
+            # Agentic Auto-Booter Feature
+            fallback_command = config.get("auto_boot_command")
+            max_retries = config.get("max_retries", 1)
+            retry_count_attr = f"_{name}_retry_count"
+            current_retries = getattr(self, retry_count_attr, 0)
+            
+            if fallback_command and current_retries < max_retries:
+                logger.info(f"[MCPBridge] Auto-booting failed MCP '{name}' with: {fallback_command}")
+                setattr(self, retry_count_attr, current_retries + 1)
+                
+                try:
+                    parts = fallback_command.split()
+                    if parts[0] == "python":
+                        parts[0] = sys.executable
+                        
+                    subprocess.Popen(
+                        parts,
+                        cwd=os.path.join(os.path.dirname(__file__), "..", "..", ".."),
+                        env={**os.environ, "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "..")}
+                    )
+                    logger.info(f"[MCPBridge] Spawned '{name}', waiting 3 seconds before auto-reconnect...")
+                    await asyncio.sleep(3)
+                    
+                    # Retry connection
+                    return await self._connect_websocket(name, config)
+                except Exception as boot_err:
+                    logger.error(f"[MCPBridge] Auto-boot failed for '{name}': {boot_err}")
+            
             self.discovered_servers[name] = {
                 "url": url, "status": "error", "tools": [], "error": str(e),
             }
@@ -183,7 +222,7 @@ class MCPBridge:
             loop = asyncio.get_event_loop()
             response_line = await asyncio.wait_for(
                 loop.run_in_executor(None, process.stdout.readline),
-                timeout=10.0
+                timeout=30.0
             )
             
             if not response_line:
@@ -210,7 +249,7 @@ class MCPBridge:
             
             tools_line = await asyncio.wait_for(
                 loop.run_in_executor(None, process.stdout.readline),
-                timeout=10.0
+                timeout=30.0
             )
             
             if tools_line:
@@ -333,6 +372,36 @@ class MCPBridge:
             except Exception as e:
                 logger.warning(f"[MCPBridge] Failed to read registry: {e}")
         return {}
+
+    def _read_runtime_registry(self) -> Dict[str, Any]:
+        """Read MCP server definitions from runtime.yaml."""
+        if not RUNTIME_YAML_PATH.exists():
+            return {}
+
+        try:
+            import yaml
+
+            data = yaml.safe_load(RUNTIME_YAML_PATH.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            logger.warning(f"[MCPBridge] Failed to read runtime.yaml MCP registry: {e}")
+            return {}
+
+        servers = data.get("mcpServers", {}) or {}
+        normalized: Dict[str, Any] = {}
+        for name, config in servers.items():
+            if not isinstance(config, dict):
+                continue
+            normalized[name] = {
+                "type": config.get("type", "stdio"),
+                "command": config.get("command", ""),
+                "args": config.get("args", []),
+                "url": config.get("url", ""),
+                "disabled": bool(config.get("disabled", False)),
+                "auto_start": bool(config.get("auto_start", False)),
+                "env": config.get("env", {}),
+                "persistence": "permanent",
+            }
+        return normalized
     
     async def add_server(self, url: str) -> bool:
         """Legacy compatibility: add a server by URL."""
@@ -346,3 +415,23 @@ class MCPBridge:
                 await self.disconnect(name)
                 return await self.connect(name, conn["config"])
         return False
+
+    def _normalize_command(self, parts: List[str], venv_python: str) -> List[str]:
+        if not parts:
+            return parts
+
+        command = parts[0]
+        if command in {"python", "py"}:
+            parts[0] = venv_python
+            return parts
+
+        if os.name == "nt":
+            windows_wrappers = {
+                "npx": "npx.cmd",
+                "npm": "npm.cmd",
+                "pnpm": "pnpm.cmd",
+                "yarn": "yarn.cmd",
+            }
+            parts[0] = windows_wrappers.get(command, command)
+
+        return parts

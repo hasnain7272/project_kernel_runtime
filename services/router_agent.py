@@ -1,63 +1,124 @@
-from fastapi import APIRouter, HTTPException, Depends
-from typing import Dict, Any, Optional
+import asyncio
+import json
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
+
+from project_kernel_runtime.kernel.credits_engine import credits_engine
+from project_kernel_runtime.kernel.task_state_machine import TaskStatus, TaskStep, TaskType
 from project_kernel_runtime.memory.state_hub import state_hub
 
 router = APIRouter()
 
-@router.patch("/system/provider")
-async def patch_system_provider(request: Dict[str, Any]):
-    """Hot-swap the system inference provider (Ollama, OpenAI, Anthropic) with custom host/port settings."""
+_session_byok: Dict[str, Dict[str, str]] = {}
+
+
+def _get_orchestrator():
     from project_kernel_runtime.services.fastapi_server import orchestrator
-    import os
+
     if not orchestrator:
         raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    provider_name = request.get("provider", "ollama")
-    model_name = request.get("model", "qwen2.5-coder:7b")
-    host = request.get("host", "127.0.0.1")
-    port = request.get("port", "11434")
-    
-    # Actually update the LLM provider
-    try:
-        llm = orchestrator.llm
-        
-        # Set the model with litellm prefix
-        if provider_name == "ollama":
-            llm.active_model = f"ollama/{model_name}"
-            llm.set_ollama_base_url(host, port)
-        elif provider_name == "openai":
-            llm.active_model = model_name  # gpt-4o, etc.
-        elif provider_name == "anthropic":
-            llm.active_model = model_name  # claude-sonnet-4-20250514, etc.
-        else:
-            llm.active_model = f"{provider_name}/{model_name}"
-        
-        import logging
-        logging.getLogger(__name__).info(
-            f"[ProviderSwitch] Model: {llm.active_model}, "
-            f"Ollama URL: {llm.ollama_base_url}"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to switch provider: {e}")
-    
+    return orchestrator
+
+
+def _session_payload(session) -> Dict[str, Any]:
     return {
-        "message": "Inference Provider Updated",
-        "active": {
-            "provider": provider_name,
-            "model": llm.active_model,
-            "host": host,
-            "port": port,
-            "ollama_base_url": llm.ollama_base_url if provider_name == "ollama" else None,
-        }
+        "id": session.session_id,
+        "session_id": session.session_id,
+        "user_id": session.user_id,
+        "workspace_path": session.workspace_path,
+        "mode": session.mode,
+        "skills": getattr(session, "skills", []),
+        "mcp_servers": getattr(session, "mcp_servers", []),
+        "folders": getattr(session, "folders", []),
+        "active": session.is_active,
+        "created_at": session.created_at.isoformat(),
+        "last_active": session.last_active.isoformat(),
+        "recent_files": session.get_recent_files(),
+        "recent_tasks": session.get_recent_tasks(),
     }
+
+
+def _task_payload(task) -> Dict[str, Any]:
+    return {
+        "task_id": task.id,
+        "id": task.id,
+        "type": task.type.value if hasattr(task.type, "value") else str(task.type),
+        "description": task.description,
+        "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat(),
+        "session_id": task.session_id,
+        "error": task.error,
+        "progress": task.progress,
+        "steps": [
+            {
+                "id": step.id,
+                "description": step.description,
+                "status": step.status.value if hasattr(step.status, "value") else str(step.status),
+                "result": jsonable_encoder(step.result),
+                "error": step.error,
+            }
+            for step in task.steps
+        ],
+    }
+
+
+def _tool_result_payload(result) -> Dict[str, Any]:
+    return {
+        "tool_call_id": result.tool_call_id,
+        "tool_name": result.tool_name,
+        "success": result.success,
+        "output": jsonable_encoder(result.output),
+        "error": result.error,
+        "duration_ms": result.duration_ms,
+        "metadata": jsonable_encoder(result.metadata),
+    }
+
+
+async def _resolve_session(orchestrator, identifier: Optional[str], user_id: Optional[str]) -> Optional[Any]:
+    if identifier:
+        session = await orchestrator.get_session_context(identifier)
+        if session:
+            return session
+    if user_id:
+        session = await orchestrator.get_session_context(user_id)
+        if session:
+            return session
+    return None
+
+
+async def _run_agent_task(orchestrator, task, user_id: str, session_id: str, description: str, max_iterations: int):
+    try:
+        state_hub.update_task_state(task.id, "running")
+        result = await orchestrator.execute_agentic_loop(
+            description,
+            user_id=user_id,
+            session_id=session_id,
+            max_iterations=max_iterations,
+        )
+        task.complete_step(result)
+        task.status = TaskStatus.COMPLETED
+        task.updated_at = datetime.now(task.updated_at.tzinfo)
+        orchestrator.tasks.save_task(task)
+        state_hub.update_task_state(task.id, "completed", result)
+    except Exception as exc:
+        task.fail_step(str(exc))
+        task.status = TaskStatus.FAILED
+        task.updated_at = datetime.now(task.updated_at.tzinfo)
+        orchestrator.tasks.save_task(task)
+        state_hub.update_task_state(task.id, "failed", {"error": str(exc)})
+    finally:
+        orchestrator.running_tasks.pop(task.id, None)
+
 
 @router.post("/sessions")
 async def create_session(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Create a new user session"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+    orchestrator = _get_orchestrator()
 
     user_id = request.get("user_id")
     workspace_path = request.get("workspace_path")
@@ -66,949 +127,517 @@ async def create_session(request: Dict[str, Any]):
     if not user_id or not workspace_path:
         raise HTTPException(status_code=400, detail="user_id and workspace_path required")
 
-    try:
-        session = await orchestrator.start_session(user_id, workspace_path, mode)
-        return {
-            "session_id": session.session_id,
-            "user_id": session.user_id,
-            "workspace_path": session.workspace_path,
-            "mode": session.mode,
-            "created_at": session.created_at.isoformat()
-        }
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    session = await orchestrator.start_session(user_id, workspace_path, mode)
+    return _session_payload(session)
 
-@router.delete("/sessions/{user_id}")
-async def end_session(user_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """End user session"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
 
-    try:
-        await orchestrator.end_session(user_id)
-        return {"message": "Session ended"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@router.get("/sessions")
+async def list_sessions():
+    orchestrator = _get_orchestrator()
+    sessions = [_session_payload(session) for session in orchestrator.sessions.sessions.values()]
+    sessions.sort(key=lambda item: item["created_at"], reverse=True)
+    return {"sessions": sessions}
 
-@router.get("/sessions/{user_id}")
-async def get_session(user_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get current session for user"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
 
-    try:
-        session = await orchestrator.get_session_context(user_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+@router.get("/sessions/{identifier}")
+async def get_session(identifier: str):
+    orchestrator = _get_orchestrator()
+    session = await orchestrator.get_session_context(identifier)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _session_payload(session)
 
-        return {
-            "session_id": session.session_id,
-            "user_id": session.user_id,
-            "workspace_path": session.workspace_path,
-            "mode": session.mode,
-            "last_active": session.last_active.isoformat(),
-            "recent_files": session.get_recent_files(),
-            "recent_tasks": session.get_recent_tasks()
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/sessions/{session_id}")
+async def end_session(session_id: str):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    orchestrator.sessions.end_session(session_id)
+    orchestrator.active_sessions.pop(session.user_id, None)
+    return {"message": "Session ended", "session_id": session_id}
+
+
+@router.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = getattr(session, "conversation_messages", [])
+    return {"session_id": session_id, "history": history, "messages": history, "total": len(history)}
+
+
+@router.patch("/sessions/{session_id}")
+async def patch_session(session_id: str, request: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if "skills" in request:
+        session.skills = list(dict.fromkeys(request.get("skills", [])))
+    if "mcp_servers" in request:
+        session.mcp_servers = list(dict.fromkeys(request.get("mcp_servers", [])))
+    if "folders" in request:
+        session.folders = list(dict.fromkeys(request.get("folders", [])))
+    if "mode" in request and request["mode"]:
+        session.mode = request["mode"]
+
+    orchestrator.sessions.update_session(session_id, session)
+    return _session_payload(session)
+
+
+@router.post("/sessions/{session_id}/mode")
+async def set_session_mode(session_id: str, payload: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    mode = payload.get("mode", "web")
+    session.mode = mode
+    orchestrator.sessions.update_session(session_id, session)
+    return {"session_id": session_id, "mode": mode}
+
+
+@router.get("/sessions/{session_id}/skills")
+async def get_session_skills(session_id: str):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session_id": session_id, "skills": getattr(session, "skills", [])}
+
+
+@router.post("/sessions/{session_id}/skills")
+async def set_session_skills(session_id: str, payload: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.skills = list(dict.fromkeys(payload.get("skills", [])))
+    orchestrator.sessions.update_session(session_id, session)
+    return {"session_id": session_id, "skills": session.skills}
+
+
+@router.post("/sessions/{session_id}/byok")
+async def set_session_byok(session_id: str, payload: Dict[str, Any]):
+    provider = payload.get("provider", "")
+    api_key = payload.get("api_key", "")
+    if not provider or not api_key:
+        raise HTTPException(status_code=400, detail="provider and api_key required")
+
+    _session_byok.setdefault(session_id, {})[provider] = api_key
+    return {
+        "session_id": session_id,
+        "provider": provider,
+        "set": True,
+        "masked_key": api_key[:8] + "..." + api_key[-4:],
+    }
+
+
+@router.get("/sessions/{session_id}/byok")
+async def get_session_byok(session_id: str):
+    keys = _session_byok.get(session_id, {})
+    return {
+        "session_id": session_id,
+        "providers": {provider: value[:8] + "..." + value[-4:] for provider, value in keys.items()},
+    }
+
 
 @router.post("/tasks")
 async def create_task(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Create a new task"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+    orchestrator = _get_orchestrator()
 
-    user_id = request.get("user_id")
-    task_type = request.get("task_type")
-    description = request.get("description")
-    steps = request.get("steps", [])
-    context = request.get("context")
+    description = request.get("description", "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description required")
 
-    if not user_id or not task_type or not description or not steps:
-        raise HTTPException(status_code=400, detail="user_id, task_type, description, and steps required")
+    session = await _resolve_session(
+        orchestrator,
+        request.get("session_id"),
+        request.get("user_id"),
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    from project_kernel_runtime.kernel.task_state_machine import TaskType
+    raw_task_type = request.get("task_type", TaskType.CUSTOM.value)
     try:
-        task_type_enum = TaskType(task_type)
+        task_type = TaskType(raw_task_type)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid task type: {task_type}")
+        task_type = TaskType.CUSTOM
 
-    try:
-        task = await orchestrator.create_task(
-            user_id, task_type_enum, description, steps, context
+    task = orchestrator.tasks.create_task(
+        type=task_type,
+        description=description,
+        steps=[TaskStep(id="agent_loop", description=description, tools=[])],
+        context=request.get("context", {}),
+        session_id=session.session_id,
+    )
+    orchestrator.sessions.add_task_to_session(session.session_id, task.id)
+    orchestrator.sessions.add_message_to_session(session.session_id, "user", description)
+    state_hub.update_task_state(task.id, "queued", {"session_id": session.session_id})
+
+    max_iterations = int(request.get("max_iterations", 8))
+    background = asyncio.create_task(
+        _run_agent_task(
+            orchestrator,
+            task,
+            session.user_id,
+            session.session_id,
+            description,
+            max_iterations,
         )
-        return {
-            "task_id": task.id,
-            "type": task.type.value,
-            "description": task.description,
-            "status": task.status.value,
-            "created_at": task.created_at.isoformat(),
-            "steps_count": len(task.steps)
-        }
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    )
+    orchestrator.running_tasks[task.id] = background
+
+    return _task_payload(task)
+
 
 @router.post("/tasks/{task_id}/execute")
 async def execute_task(task_id: str, request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Execute a task"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+    orchestrator = _get_orchestrator()
+    task = orchestrator.tasks.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-    user_id = request.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
+    if task_id in orchestrator.running_tasks and not orchestrator.running_tasks[task_id].done():
+        return {"message": "Task already running", "task_id": task_id, "status": "running"}
 
-    try:
-        success = await orchestrator.execute_task(user_id, task_id)
-        return {"message": "Task execution started", "success": success}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    session = orchestrator.sessions.get_session(task.session_id) if task.session_id else None
+    if not session:
+        raise HTTPException(status_code=404, detail="Task session not found")
+
+    background = asyncio.create_task(
+        _run_agent_task(
+            orchestrator,
+            task,
+            session.user_id,
+            session.session_id,
+            task.description,
+            int(request.get("max_iterations", 8)),
+        )
+    )
+    orchestrator.running_tasks[task.id] = background
+    return {"message": "Task execution started", "task_id": task_id, "status": "running"}
+
 
 @router.delete("/tasks/{task_id}")
-async def stop_task(task_id: str, request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Force stop or cancel an active agent task via Swarm API"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+async def stop_task(task_id: str):
+    orchestrator = _get_orchestrator()
+    task = orchestrator.tasks.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-    user_id = request.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
+    running = orchestrator.running_tasks.pop(task_id, None)
+    if running and not running.done():
+        running.cancel()
 
-    try:
-        # Check if the task exists and transition it
-        task = await orchestrator.get_task_status(user_id, task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        from project_kernel_runtime.kernel.task_state_machine import TaskStatus
-        await orchestrator.tasks.transition_task(task_id, TaskStatus.FAILED, {"error": "Stopped by User API"})
-        
-        # If there's an active execution task tracking it, cancel it
-        if task_id in orchestrator.running_tasks:
-            orchestrator.running_tasks[task_id].cancel()
-            del orchestrator.running_tasks[task_id]
+    await orchestrator.tasks.transition_task(task_id, TaskStatus.CANCELLED, {"error": "Cancelled by user"})
+    state_hub.update_task_state(task_id, "cancelled")
+    return {"message": f"Task {task_id} cancelled", "status": "cancelled"}
 
-        return {"message": f"Task {task_id} forcefully stopped", "status": "failed"}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/tasks/{task_id}")
-async def get_task_status(task_id: str, user_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get task status"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+async def get_task_status(task_id: str):
+    orchestrator = _get_orchestrator()
+    task = orchestrator.tasks.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return _task_payload(task)
 
-    try:
-        task = await orchestrator.get_task_status(user_id, task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        return {
-            "task_id": task.id,
-            "type": task.type.value,
-            "description": task.description,
-            "status": task.status.value,
-            "created_at": task.created_at.isoformat(),
-            "updated_at": task.updated_at.isoformat(),
-            "current_step": task.get_current_step().id if task.get_current_step() else None,
-            "steps": [
-                {
-                    "id": step.id,
-                    "description": step.description,
-                    "status": step.status.value,
-                    "result": step.result,
-                    "error": step.error
-                }
-                for step in task.steps
-            ]
-        }
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/tasks/{task_id}/trace")
 async def get_task_trace(task_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get the full reasoning trace (The 'Why') for an agentic task."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+    orchestrator = _get_orchestrator()
+    task = orchestrator.tasks.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-    try:
-        # Check if the orchestrator has a tracer for this task
-        if hasattr(orchestrator, 'tracer') and orchestrator.tracer.session_id == f"trace_{task_id}":
-            return {"trace": orchestrator.tracer.get_full_trace()}
-        
-        raise HTTPException(status_code=404, detail="Trace not found for this task")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    events = [
+        {
+            "type": event.type,
+            "timestamp": event.timestamp.isoformat(),
+            "payload": jsonable_encoder(event.payload),
+        }
+        for event in orchestrator.event_bus.get_event_log(last_n=200)
+        if event.task_id == task_id
+    ]
+    return {"task_id": task_id, "events": events}
+
 
 @router.get("/tasks")
-async def list_tasks(user_id: str, status: Optional[str] = None):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """List user tasks"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+async def list_tasks(user_id: Optional[str] = None, status: Optional[str] = None):
+    orchestrator = _get_orchestrator()
+    task_status = TaskStatus(status) if status else None
 
-    from project_kernel_runtime.kernel.task_state_machine import TaskStatus
-    if status:
-        try:
-            status_enum = TaskStatus(status)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+    if user_id:
+        session = await orchestrator.get_session_context(user_id)
+        if session:
+            tasks = orchestrator.tasks.list_tasks(status=task_status, session_id=session.session_id)
+        else:
+            tasks = []
     else:
-        status_enum = None
+        tasks = orchestrator.tasks.list_tasks(status=task_status)
 
-    try:
-        tasks = await orchestrator.list_user_tasks(user_id, status_enum)
-        return [
-            {
-                "task_id": task.id,
-                "type": task.type.value,
-                "description": task.description,
-                "status": task.status.value,
-                "created_at": task.created_at.isoformat()
-            }
-            for task in tasks
-        ]
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return [_task_payload(task) for task in tasks]
 
-# ============================================================================
-# Memory Fabric & Governance (Horizon 2028 APIs)
-# ============================================================================
 
 @router.post("/memory/inject")
 async def inject_memory(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Inject semantic knowledge directly into ChromaDB via Frontend."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    agent_id = request.get("agent_id", "system")
-    content = request.get("content")
-    importance = float(request.get("importance", 0.5))
-    
+    orchestrator = _get_orchestrator()
+    content = request.get("content", "").strip()
     if not content:
         raise HTTPException(status_code=400, detail="content required")
 
-    try:
-        memory_id = await orchestrator.vector_db.agent_memory.remember(agent_id, content, metadata={"source": "ui_inject"}, importance=importance)
-        return {"message": "Knowledge injected", "memory_id": memory_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    memory_id = await orchestrator.vector_db.agent_memory.remember(
+        content=content,
+        context=request.get("context", ""),
+        task_id=request.get("task_id", ""),
+        category=request.get("category", "general"),
+    )
+    return {"message": "Knowledge injected", "memory_id": memory_id}
+
 
 @router.post("/memory/search")
 async def search_memory(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Search for semantic knowledge in ChromaDB via Frontend."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    agent_id = request.get("agent_id", "system")
-    query = request.get("query", "")
-    limit = int(request.get("limit", 10))
-    
+    orchestrator = _get_orchestrator()
+    query = request.get("query", "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="query required")
 
-    try:
-        results = await orchestrator.vector_db.agent_memory.recall(agent_id, query, limit=limit)
-        return {"results": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    results = await orchestrator.vector_db.agent_memory.recall(
+        query=query,
+        limit=int(request.get("limit", 10)),
+        category=request.get("category"),
+    )
+    return {"results": [result.to_dict() for result in results]}
+
 
 @router.post("/governance/rules")
 async def tweak_governance(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Dynamically tweak governance policies mid-flight."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    sandbox_mode = request.get("force_sandbox")
-    if sandbox_mode is not None:
-        orchestrator.governance.config.force_sandbox = bool(sandbox_mode)
-    
-    token_limit = request.get("max_tokens_per_task")
-    if token_limit is not None:
-        orchestrator.governance.config.max_tokens_per_task = int(token_limit)
+    orchestrator = _get_orchestrator()
+    governance = orchestrator.config.governance
 
-    return {"message": "Governance policies updated", "config": orchestrator.governance.config.model_dump()}
+    for key in ("default_role", "enabled", "require_approval_for", "network_allowlist"):
+        if key in request:
+            setattr(governance, key, request[key])
+    return {"message": "Governance policies updated", "config": governance.model_dump()}
+
 
 @router.get("/governance/rules")
 async def get_governance():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    return orchestrator.governance.config.model_dump()
+    orchestrator = _get_orchestrator()
+    return orchestrator.config.governance.model_dump()
+
 
 @router.post("/tools/call")
 async def call_tool(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Call a tool"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+    orchestrator = _get_orchestrator()
 
-    user_id = request.get("user_id")
-    tool_name = request.get("tool_name")
-    arguments = request.get("arguments", {})
-    session_id = request.get("session_id")
+    session = await _resolve_session(
+        orchestrator,
+        request.get("session_id"),
+        request.get("user_id"),
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    if not user_id or not tool_name:
-        raise HTTPException(status_code=400, detail="user_id and tool_name required")
+    tool_name = request.get("tool_name", "").strip()
+    if not tool_name:
+        raise HTTPException(status_code=400, detail="tool_name required")
 
-    try:
-        result = await orchestrator.call_tool(user_id, tool_name, arguments, session_id)
-        return {"result": result}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await orchestrator.call_tool(
+        session.user_id,
+        tool_name,
+        request.get("arguments", {}),
+        session.session_id,
+    )
+    return {"result": _tool_result_payload(result)}
+
 
 @router.get("/skills")
-async def get_available_skills(user_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get skills available to user"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+async def get_available_skills(user_id: Optional[str] = None):
+    orchestrator = _get_orchestrator()
+    skills = await orchestrator.get_available_skills(user_id or "anonymous")
+    return {"skills": skills}
 
-    try:
-        skills = await orchestrator.get_available_skills(user_id)
-        return {"skills": skills}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/status/intelligence")
-async def get_intelligence_status(user_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get security scores and agentic performance metrics."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+async def get_intelligence_status(user_id: Optional[str] = Query(default=None)):
+    orchestrator = _get_orchestrator()
+    session = await orchestrator.get_session_context(user_id) if user_id else None
 
-    try:
-        security = orchestrator.sandbox.calculate_security_score()
-        peers = orchestrator.a2a.list_peers()
-        
-        # Predictive suggestions based on current active task if any
-        context = "research" # Default mock context
-        suggestions = orchestrator.predictive.suggest_next_steps(context)
-        
-        # Mesh V2 Knowledge
-        knowledge = orchestrator.mesh_v2.knowledge_store
+    recent_tasks = orchestrator.tasks.list_tasks(
+        session_id=session.session_id if session else None
+    )[:5]
+    memory_count = getattr(orchestrator.vector_db.agent_memory.store, "count", 0)
+    memory_count = memory_count() if callable(memory_count) else memory_count
 
-        # Swarm Clusters Month 15-16
-        clusters = orchestrator.cluster_manager.get_cluster_topology()
-        
-        # Recent running tasks (Month 17-18 UI)
-        recent = orchestrator.tasks.list_tasks()[:3]
-        recent_tasks = [t.to_dict() for t in recent]
-        
-        # Month 25-26: SSOT Hub Snapshot
-        hub_snapshot = state_hub.get_snapshot()
-        
-        return {
-            "security": security,
-            "a2a_peers_count": len(peers),
-            "a2a_peers": [p.dict() for p in peers],
-            "evaluation": orchestrator.eval_harness.get_report(),
-            "predictive_suggestions": suggestions,
-            "mesh_knowledge": knowledge,
-            "clusters": clusters,
-            "recent_tasks": recent_tasks,
-            "hub": hub_snapshot,
-            "active_mind": {
-                "model": orchestrator.runtime.active_model,
-                "provider": "Ollama (Local)" if "ollama" in orchestrator.runtime.active_model.lower() or ":" in orchestrator.runtime.active_model else "Cloud API"
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "runtime": {
+            "version": getattr(orchestrator.config, "version", "2.0.0"),
+            "mode": getattr(orchestrator.config, "mode", "development"),
+        },
+        "session": _session_payload(session) if session else None,
+        "security": orchestrator.sandbox.calculate_security_score(),
+        "llm": orchestrator.llm.get_usage_stats(),
+        "mcp": orchestrator.mcp_bridge.get_status(),
+        "mesh": orchestrator.mesh_p2p.get_mesh_status(),
+        "memory": {"stored_items": memory_count},
+        "tasks": [_task_payload(task) for task in recent_tasks],
+        "snapshot": state_hub.get_snapshot(),
+    }
 
-@router.get("/intelligence/thoughts")
-async def get_thought_stream():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Stream the latest Reasoning Frames for total observability."""
-    return {"thoughts": state_hub.thought_stream[-50:]}
-
-@router.post("/intelligence/hot-reload")
-async def hot_reload_logic(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Hot Reload agentic logic via 3D UI interaction."""
-    agent_id = data.get("agent_id")
-    logic = data.get("logic")
-    if not agent_id or not logic:
-        raise HTTPException(status_code=400, detail="Missing agent_id or logic")
-    
-    state_hub.inject_thought_delta(agent_id, logic)
-    return {"status": "success", "agent_id": agent_id}
-
-@router.post("/gtm/campaign")
-async def trigger_gtm_campaign(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Trigger an autonomous GTM campaign."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Orchestrator not ready")
-    
-    name = data.get("name", f"Campaign_{datetime.now().strftime('%Y%m%d_%H%M')}")
-    niche = data.get("niche", "Agentic AI")
-    
-    await orchestrator.trigger_gtm_campaign(name, niche)
-    return {"status": "success", "campaign": name, "niche": niche}
-
-@router.post("/intelligence/mcp/reprobe")
-async def reprobe_mcp(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Manually re-probe an MCO Hub."""
-    url = data.get("url")
-    if not url or not orchestrator:
-        raise HTTPException(status_code=400, detail="URL or orchestrator missing")
-    
-    success = await orchestrator.mcp_bridge.reprobe_server(url)
-    return {"status": "success" if success else "failed"}
-
-@router.post("/intelligence/mcp/launch")
-async def launch_app(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Launch an application for a specific MCO (e.g. Blender)."""
-    app_name = data.get("app_name")
-    if not app_name or not orchestrator:
-        raise HTTPException(status_code=400, detail="app_name missing")
-    
-    success = orchestrator.instance_manager.launch_app(app_name)
-    return {"status": "success" if success else "failed"}
-
-@router.post("/intelligence/scratchpad/dispatch")
-async def dispatch_scratchpad(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Dispatch a script from the Sovereign Scratchpad."""
-    script = data.get("script")
-    if not script:
-        raise HTTPException(status_code=400, detail="Script missing")
-    
-    state_hub.record_thought("Kernel_Sandbox", "Execution", f"Scratchpad Dispatch Received. Length: {len(script)} chars.")
-    
-    # Analyze the script for browser-mcp tool calls
-    if "browser_" in script:
-        state_hub.record_thought("Kernel_Sandbox", "Routing", "Detected Browser-native directives. Routing to ChromeMCP bridge...")
-        # Simulate tool execution result
-        state_hub.record_thought("ChromeMCP", "Action", "Executing scratchpad directive: Navigating to target URI.")
-    
-    return {"status": "success", "message": "Script dispatched to Sandbox"}
-
-@router.get("/intelligence/mcp/discovery")
-async def get_mcp_discovery():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get the current state of the MCO mesh."""
-    if not orchestrator:
-        return {"servers": []}
-    
-    servers = []
-    for sid, info in orchestrator.mcp_bridge.discovered_servers.items():
-        servers.append({
-            "name": sid,
-            "url": info.get("url"),
-            "status": info.get("status", "unknown"),
-            "tools": info.get("tools", [])
-        })
-    return {"servers": servers}
-
-@router.get("/intelligence/vision/config")
-async def get_vision_config():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get dynamic VLM configuration."""
-    from project_kernel_runtime.agents.vision_swarm import vision_swarm
-    return vision_swarm.get_config()
-
-@router.post("/intelligence/vision/config")
-async def update_vision_config(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Update active VLM engine."""
-    from project_kernel_runtime.agents.vision_swarm import vision_swarm
-    model_id = data.get("model_id")
-    if vision_swarm.set_model(model_id):
-        return {"status": "success", "active_model": model_id}
-    raise HTTPException(status_code=400, detail="Invalid model_id")
 
 @router.get("/billing/credits")
 async def get_credits_balance(tenant_id: str = "root"):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get current agentic credit balance for a tenant."""
-    from project_kernel_runtime.kernel.credits_engine import credits_engine
-    return {"tenant_id": tenant_id, "balance": credits_engine.get_balance(tenant_id)}
+    return {
+        "tenant_id": tenant_id,
+        "balance": credits_engine.get_balance(tenant_id),
+        "usage": credits_engine.get_usage(tenant_id),
+        "report": credits_engine.get_report(tenant_id),
+    }
 
-@router.get("/status/intelligence")
-async def get_intelligence_status(user_id: str):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get security scores and agentic performance metrics."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-
-    try:
-        security = orchestrator.sandbox.calculate_security_score()
-        peers = orchestrator.a2a.list_peers()
-        
-        # Predictive suggestions based on current active task if any
-        context = "research" # Default mock context
-        suggestions = orchestrator.predictive.suggest_next_steps(context)
-        
-        # Mesh V2 Knowledge
-        knowledge = orchestrator.mesh_v2.knowledge_store
-
-        # Swarm Clusters Month 15-16
-        clusters = orchestrator.cluster_manager.get_cluster_topology()
-        
-        # Recent running tasks (Month 17-18 UI)
-        recent = orchestrator.tasks.list_tasks()[:3]
-        recent_tasks = [t.to_dict() for t in recent]
-        
-        # Month 25-26: SSOT Hub Snapshot
-        hub_snapshot = state_hub.get_snapshot()
-        
-        return {
-            "security": security,
-            "a2a_peers_count": len(peers),
-            "a2a_peers": [p.dict() for p in peers],
-            "evaluation": orchestrator.eval_harness.get_report(),
-            "predictive_suggestions": suggestions,
-            "mesh_knowledge": knowledge,
-            "clusters": clusters,
-            "recent_tasks": recent_tasks,
-            "hub": hub_snapshot,
-            "active_mind": {
-                "model": orchestrator.runtime.active_model,
-                "provider": "Ollama (Local)" if "ollama" in orchestrator.runtime.active_model.lower() or ":" in orchestrator.runtime.active_model else "Cloud API"
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/intelligence/thoughts")
-async def get_thought_stream():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Stream the latest Reasoning Frames for total observability."""
-    return {"thoughts": state_hub.thought_stream[-50:]}
-
-@router.post("/intelligence/hot-reload")
-async def hot_reload_logic(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Hot Reload agentic logic via 3D UI interaction."""
-    agent_id = data.get("agent_id")
-    logic = data.get("logic")
-    if not agent_id or not logic:
-        raise HTTPException(status_code=400, detail="Missing agent_id or logic")
-    
-    state_hub.inject_thought_delta(agent_id, logic)
-    return {"status": "success", "agent_id": agent_id}
-
-@router.post("/gtm/campaign")
-async def trigger_gtm_campaign(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Trigger an autonomous GTM campaign."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Orchestrator not ready")
-    
-    name = data.get("name", f"Campaign_{datetime.now().strftime('%Y%m%d_%H%M')}")
-    niche = data.get("niche", "Agentic AI")
-    
-    await orchestrator.trigger_gtm_campaign(name, niche)
-    return {"status": "success", "campaign": name, "niche": niche}
-
-@router.post("/intelligence/mcp/reprobe")
-async def reprobe_mcp(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Manually re-probe an MCO Hub."""
-    url = data.get("url")
-    if not url or not orchestrator:
-        raise HTTPException(status_code=400, detail="URL or orchestrator missing")
-    
-    success = await orchestrator.mcp_bridge.reprobe_server(url)
-    return {"status": "success" if success else "failed"}
-
-@router.post("/intelligence/mcp/launch")
-async def launch_app(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Launch an application for a specific MCO (e.g. Blender)."""
-    app_name = data.get("app_name")
-    if not app_name or not orchestrator:
-        raise HTTPException(status_code=400, detail="app_name missing")
-    
-    success = orchestrator.instance_manager.launch_app(app_name)
-    return {"status": "success" if success else "failed"}
-
-@router.post("/intelligence/scratchpad/dispatch")
-async def dispatch_scratchpad(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Dispatch a script from the Sovereign Scratchpad."""
-    script = data.get("script")
-    if not script:
-        raise HTTPException(status_code=400, detail="Script missing")
-    
-    state_hub.record_thought("Kernel_Sandbox", "Execution", f"Scratchpad Dispatch Received. Length: {len(script)} chars.")
-    
-    # Analyze the script for browser-mcp tool calls
-    if "browser_" in script:
-        state_hub.record_thought("Kernel_Sandbox", "Routing", "Detected Browser-native directives. Routing to ChromeMCP bridge...")
-        # Simulate tool execution result
-        state_hub.record_thought("ChromeMCP", "Action", "Executing scratchpad directive: Navigating to target URI.")
-    
-    return {"status": "success", "message": "Script dispatched to Sandbox"}
-
-@router.get("/intelligence/mcp/discovery")
-async def get_mcp_discovery():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get the current state of the MCO mesh."""
-    if not orchestrator:
-        return {"servers": []}
-    
-    servers = []
-    for sid, info in orchestrator.mcp_bridge.discovered_servers.items():
-        servers.append({
-            "name": sid,
-            "url": info.get("url"),
-            "status": info.get("status", "unknown"),
-            "tools": info.get("tools", [])
-        })
-    return {"servers": servers}
-
-@router.get("/intelligence/vision/config")
-async def get_vision_config():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get dynamic VLM configuration."""
-    from project_kernel_runtime.agents.vision_swarm import vision_swarm
-    return vision_swarm.get_config()
-
-@router.post("/intelligence/vision/config")
-async def update_vision_config(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Update active VLM engine."""
-    from project_kernel_runtime.agents.vision_swarm import vision_swarm
-    model_id = data.get("model_id")
-    if vision_swarm.set_model(model_id):
-        return {"status": "success", "active_model": model_id}
-    raise HTTPException(status_code=400, detail="Invalid model_id")
-
-@router.get("/billing/credits")
-async def get_credits_balance(tenant_id: str = "root"):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get current agentic credit balance for a tenant."""
-    from project_kernel_runtime.kernel.credits_engine import credits_engine
-    return {"tenant_id": tenant_id, "balance": credits_engine.get_balance(tenant_id)}
 
 @router.get("/protocols/mcp")
 async def list_mcps():
-    """List all mounted MCP servers (both memory and permanent registry)."""
-    import json
-    import os
-    registry_path = "data/mcp_registry.json"
+    orchestrator = _get_orchestrator()
+    registry_path = Path(__file__).resolve().parent.parent / "data" / "mcp_registry.json"
     registry = {}
-    if os.path.exists(registry_path):
+    if registry_path.exists():
         try:
-            with open(registry_path, "r", encoding="utf-8") as f:
-                registry = json.load(f)
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
         except Exception:
-            pass
-            
-    # Also grab in-memory only (if we implement a RAM dict, but let's serve registry + mock)
-    return {"protocols": list(registry.values())}
+            registry = {}
+
+    return {
+        "protocols": list(registry.values()),
+        "bridge": orchestrator.mcp_bridge.get_status(),
+    }
+
 
 @router.post("/protocols/mcp/mount")
-async def mount_new_mcp(data: Dict[str, Any]):
-    """Mount a new MCP protocol and optionally save to persistence."""
-    import json
-    import os
-    
-    server_name = data.get("name")
-    server_type = data.get("type", "stdio")
-    command = data.get("command")
-    url = data.get("url")
-    persistence = data.get("persistence", "memory")
-    
-    if not server_name:
-        raise HTTPException(status_code=400, detail="MCP Name required")
-        
-    mcp_def = {
-        "name": server_name,
-        "type": server_type,
-        "description": data.get("description", "User-mounted dynamic MCP node"),
-        "persistence": persistence
-    }
-    
-    if server_type == "websocket":
-        mcp_def["url"] = url
-    else:
-        mcp_def["command"] = command
-        
-    if persistence == "permanent":
-        os.makedirs("data", exist_ok=True)
-        registry_path = "data/mcp_registry.json"
-        registry = {}
-        if os.path.exists(registry_path):
-            with open(registry_path, "r") as f:
-                try:
-                    registry = json.load(f)
-                except:
-                    pass
-                    
-        registry[server_name] = mcp_def
-        with open(registry_path, "w") as f:
-            json.dump(registry, f, indent=4)
-    
-    # Actually connect the MCP server at runtime via the MCPBridge
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    connected = False
-    if orchestrator:
-        try:
-            connected = await orchestrator.mcp_bridge.connect(server_name, mcp_def)
-        except Exception as e:
-            mcp_def["connection_error"] = str(e)
-    
-    mcp_def["connected"] = connected
-    return {"status": "success", "protocol": mcp_def}
-# ============================================================================
-# SSE Streaming Execution Endpoint (Phase 7)
-# ============================================================================
+async def mount_new_mcp(payload: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
 
-from fastapi.responses import StreamingResponse
-import asyncio
-import json as _json
+    name = payload.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+
+    config = {
+        "type": payload.get("type", "stdio"),
+        "command": payload.get("command", ""),
+        "url": payload.get("url", ""),
+        "args": payload.get("args", []),
+        "persistence": payload.get("persistence", "permanent"),
+    }
+    if not config["command"] and not config["url"]:
+        raise HTTPException(status_code=400, detail="command or url required")
+
+    registry_path = Path(__file__).resolve().parent.parent / "data" / "mcp_registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if registry_path.exists():
+        try:
+            existing = json.loads(registry_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    existing[name] = config
+    registry_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+    connected = await orchestrator.mcp_bridge.connect(name, config)
+    return {"status": "success", "protocol": {"name": name, **config, "connected": connected}}
+
 
 @router.get("/agent/execute/stream")
-async def execute_agent_stream(description: str, user_id: str = "api_user", max_iterations: int = 10):
-    """SSE endpoint that streams every step of the agentic loop to the UI in real-time."""
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+async def execute_agent_stream(
+    description: str,
+    user_id: str = "api_user",
+    session_id: Optional[str] = None,
+    max_iterations: int = 10,
+):
+    orchestrator = _get_orchestrator()
 
     async def event_generator():
-        event_queue: asyncio.Queue = asyncio.Queue()
-        
-        # Subscribe to ALL relevant events on the EventBus
-        async def _handler(event):
-            await event_queue.put(event)
-        
-        bus = orchestrator.event_bus
-        for pattern in ["task.*", "tool.*", "llm.*", "governance.*", "sre.*", "swarm.*", "mcp.*", "system.*"]:
-            bus.subscribe(pattern, _handler)
-        
-        # Emit initial gathering event
-        yield f"data: {_json.dumps({'type': 'step', 'prefix': 'SYS', 'text': f'Agentic loop initiated for: {description}', 'state': 'Gathering'})}\n\n"
-        
-        # Launch the agentic loop in background
-        result_holder = {}
-        async def _run_loop():
-            try:
-                result = await orchestrator.execute_agentic_loop(
-                    description, user_id=user_id, max_iterations=max_iterations
-                )
-                result_holder["result"] = result
-            except Exception as e:
-                result_holder["error"] = str(e)
-            finally:
-                await event_queue.put(None)  # sentinel
-        
-        task = asyncio.create_task(_run_loop())
-        
-        # Stream events as they arrive
-        while True:
-            try:
-                event = await asyncio.wait_for(event_queue.get(), timeout=120.0)
-            except asyncio.TimeoutError:
-                yield f"data: {_json.dumps({'type': 'step', 'prefix': 'SYS', 'text': 'Timeout waiting for agent response.', 'state': 'Idle'})}\n\n"
-                break
-            
-            if event is None:
-                # Loop finished
-                if "error" in result_holder:
-                    yield f"data: {_json.dumps({'type': 'error', 'prefix': 'ERROR', 'text': result_holder['error'], 'state': 'Idle'})}\n\n"
-                else:
-                    r = result_holder.get("result", {})
-                    response_text = r.get("response", "Loop completed.")
-                    iterations = r.get("iterations", 0)
-                    tool_count = len(r.get("tool_results", []))
-                    yield f"data: {_json.dumps({'type': 'done', 'prefix': 'RESULT', 'text': f'Completed in {iterations} iterations, {tool_count} tool calls. Response: {response_text[:500]}', 'state': 'Idle', 'full_result': r})}\n\n"
-                break
-            
-            # Format the event for the UI
-            etype = event.type
-            payload = event.payload
-            prefix = etype.split(".")[0].upper()
-            
-            # Map event types to human-readable log lines
-            if etype == "task.completed":
-                text = f"Task completed. Iterations: {payload.get('iterations', '?')}, Tool calls: {payload.get('tool_calls', '?')}"
-                state = "Idle"
-            elif etype.startswith("tool.called"):
-                text = f"Calling tool: {payload.get('tool', 'unknown')}({_json.dumps(payload.get('args', {}))[:100]})"
-                state = "Acting"
-            elif etype.startswith("tool.result"):
-                text = f"Tool result: {str(payload.get('output', ''))[:200]}"
-                state = "Verifying"
-            elif etype.startswith("llm."):
-                text = f"LLM {etype.split('.')[-1]}: model={payload.get('model', '?')}, tokens={payload.get('tokens', '?')}"
-                state = "Gathering"
-            elif etype.startswith("governance."):
-                text = f"Governance: {etype.split('.')[-1]} — {payload.get('reason', payload.get('tool', ''))}"
-                state = "Planning"
-            elif etype.startswith("swarm."):
-                text = f"Swarm: {payload.get('message', etype)}"
-                state = "Acting"
-            else:
-                text = f"{etype}: {str(payload)[:200]}"
-                state = "Acting"
-            
-            yield f"data: {_json.dumps({'type': 'step', 'prefix': prefix, 'text': text, 'state': state})}\n\n"
-        
-        # Unsubscribe
-        for pattern in ["task.*", "tool.*", "llm.*", "governance.*", "sre.*", "swarm.*", "mcp.*", "system.*"]:
-            bus.unsubscribe(pattern, _handler)
+        yield "data: " + json.dumps({"type": "start", "description": description}) + "\n\n"
+        try:
+            result = await orchestrator.execute_agentic_loop(
+                description,
+                user_id=user_id,
+                session_id=session_id,
+                max_iterations=max_iterations,
+            )
+            yield "data: " + json.dumps({"type": "done", "result": jsonable_encoder(result)}) + "\n\n"
+        except Exception as exc:
+            yield "data: " + json.dumps({"type": "error", "error": str(exc)}) + "\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-@router.get("/intelligence/mcp/discovery")
-async def get_mcp_discovery():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get the current state of the MCO mesh."""
-    if not orchestrator:
-        return {"servers": []}
-    
-    servers = []
-    for sid, info in orchestrator.mcp_bridge.discovered_servers.items():
-        servers.append({
-            "name": sid,
-            "url": info.get("url"),
-            "status": info.get("status", "unknown"),
-            "tools": info.get("tools", [])
-        })
-    return {"servers": servers}
-
-@router.get("/intelligence/vision/config")
-async def get_vision_config():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get dynamic VLM configuration."""
-    from project_kernel_runtime.agents.vision_swarm import vision_swarm
-    return vision_swarm.get_config()
-
-@router.post("/intelligence/vision/config")
-async def update_vision_config(data: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Update active VLM engine."""
-    from project_kernel_runtime.agents.vision_swarm import vision_swarm
-    model_id = data.get("model_id")
-    if vision_swarm.set_model(model_id):
-        return {"status": "success", "active_model": model_id}
-    raise HTTPException(status_code=400, detail="Invalid model_id")
-
-@router.get("/billing/credits")
-async def get_credits_balance(tenant_id: str = "root"):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Get current agentic credit balance for a tenant."""
-    from project_kernel_runtime.kernel.credits_engine import credits_engine
-    return {"tenant_id": tenant_id, "balance": credits_engine.get_balance(tenant_id)}
-
-@router.get("/.well-known/agent.json")
-async def a2a_agent_card():
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """A2A v0.3 Agent Card discovery endpoint."""
-    from project_kernel_runtime.integrations.a2a_protocol import A2AHandler
-    handler = A2AHandler()
-    return handler.get_agent_card()
 
 
 @router.post("/agent/execute")
 async def execute_agentic_loop(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """Execute an autonomous agentic task."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    description = request.get("description", "")
-    user_id = request.get("user_id", "api_user")
-    max_iterations = request.get("max_iterations", 20)
-    
+    orchestrator = _get_orchestrator()
+
+    description = request.get("description", "").strip()
     if not description:
         raise HTTPException(status_code=400, detail="description is required")
-    
-    try:
-        # Generate a predictive nudge for the UI before executing
-        await orchestrator.event_bus.emit_and_publish("swarm.predictive_nudge", {
-            "suggestion": f"Automatically persist insights from '{description}' to Memory Fabric?",
-            "confidence": 88
-        })
 
-        result = await orchestrator.execute_agentic_loop(
-            description, user_id=user_id, max_iterations=max_iterations,
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    session = await _resolve_session(
+        orchestrator,
+        request.get("session_id"),
+        request.get("user_id"),
+    )
+    user_id = session.user_id if session else request.get("user_id", "api_user")
+    session_id = session.session_id if session else request.get("session_id")
 
-@router.post("/swarm/fork")
-async def fork_reality(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """(Horizon 2028) Duplicate an active agent's thread-state into a new parallel session."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    task_id = request.get("task_id")
-    if not task_id:
-        raise HTTPException(status_code=400, detail="task_id required to fork")
-    
-    # Simulate a deep quantum fork of the memory context
-    from datetime import datetime
-    new_task_id = f"{task_id}-fork-{datetime.now().strftime('%M%S')}"
-    
-    # In a real environment, we would duplicate the SQLite session record.
-    await orchestrator.event_bus.emit_and_publish("swarm.reality_forked", {
-        "original_task": task_id,
-        "new_task": new_task_id,
-        "message": f"Reality successfully forked from {task_id}"
-    })
-    
-    return {"message": "Swarm fork executed successfully", "new_task_id": new_task_id}
+    result = await orchestrator.execute_agentic_loop(
+        description,
+        user_id=user_id,
+        session_id=session_id,
+        max_iterations=int(request.get("max_iterations", 12)),
+    )
+    return jsonable_encoder(result)
 
 
-@router.post("/governance/sre_auto_heal")
-async def sre_auto_heal(request: Dict[str, Any]):
-    from project_kernel_runtime.services.fastapi_server import orchestrator
-    """(Horizon 2028) Autonomous SRE intervention to halt and heal an infinite-looping agent."""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    
-    agent_id = request.get("agent_id")
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="agent_id required for SRE heal")
-        
-    await orchestrator.event_bus.emit_and_publish("sre.auto_heal.deployed", {
-        "agent_id": agent_id,
-        "action": "HALT_AND_RESET",
-        "reason": "Infinite loop heuristic threshold exceeded."
-    })
-    
-    return {"message": f"Agent {agent_id} halted and injected with correction protocol."}
+@router.get("/.well-known/agent.json")
+async def a2a_agent_card():
+    from project_kernel_runtime.integrations.a2a_protocol import A2AHandler
 
-# ============================================================================
-# Observability Endpoints
-# ============================================================================
+    handler = A2AHandler()
+    return handler.get_agent_card()
+
+
+@router.get("/workspace/diff")
+async def get_workspace_diff(session_id: str = "default"):
+    import subprocess
+
+    workspace = Path(__file__).resolve().parent.parent
+    diff = subprocess.run(
+        ["git", "diff", "HEAD", "--unified=3"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+    )
+    stat = subprocess.run(
+        ["git", "diff", "HEAD", "--stat"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+    )
+    return {
+        "session_id": session_id,
+        "diff": diff.stdout or "",
+        "summary": stat.stdout or "",
+    }

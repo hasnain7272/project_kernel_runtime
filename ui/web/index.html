@@ -1,34 +1,398 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Antigravity Prime</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles-new.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Kernel Runtime v2</title>
+
+  <!-- Tailwind + DaisyUI (Zero CSS constraint fulfilled) -->
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.10.2/dist/full.min.css" rel="stylesheet" type="text/css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- 3D Vanta Aesthetics -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.fog.min.js"></script>
+
+  <!-- UX/UI Tools -->
+  <script defer src="/ui/app.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    #vanta-canvas {
+      position: fixed;
+      z-index: -1;
+      width: 100vw;
+      height: 100vh;
+      top: 0;
+      left: 0;
+    }
+
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+    }
+
+    .sortable-ghost {
+      opacity: 0.4;
+    }
+
+    .sortable-drag {
+      background: rgba(88, 166, 255, 0.2) !important;
+      cursor: grabbing !important;
+    }
+
+    ::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+    }
+
+    .prose pre {
+      padding: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      border-radius: 6px;
+      font-size: 11px;
+    }
+
+    .prose p {
+      margin-bottom: 0.5rem;
+    }
+  </style>
 </head>
-<body>
-    <div class="app">
-        <!-- Sidebar -->
-        <aside id="sidebar" class="sidebar"></aside>
-        
-        <!-- Main Content -->
-        <main class="main">
-            <!-- Parameter Controls -->
-            <section id="content" class="content"></section>
-            
-            <!-- Workbench -->
-            <section id="workbench" class="workbench"></section>
-        </main>
-        
-        <!-- Status Bar -->
-        <footer id="statusbar" class="statusbar"></footer>
+
+<body x-data="kernelUI()" x-init="initEngine()">
+
+  <div id="vanta-canvas"></div>
+
+  <div class="flex h-screen w-screen p-4 gap-4 box-border">
+
+    <!-- LEFT PANE -->
+    <div class="w-2/3 flex flex-col gap-4">
+      <div class="glass-panel flex justify-between items-center rounded-2xl px-6 py-3 shrink-0">
+        <div class="flex items-center gap-3">
+          <i data-lucide="cpu" class="text-secondary w-6 h-6"></i>
+          <div>
+            <h1 class="text-sm font-bold tracking-widest text-base-content uppercase">Project Kernel <span
+                class="text-secondary opacity-80">v2.1</span></h1>
+            <p class="text-[10px] text-base-content/50"
+              x-text="'Active Session: ' + (activeSession?.user_id || 'None')"></p>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button class="btn btn-sm btn-ghost btn-circle" @click="fetchState()"><i data-lucide="refresh-cw"
+              class="w-4 h-4"></i></button>
+          <button class="btn btn-sm btn-primary rounded-full px-6" @click="createSession()">+ New Session</button>
+        </div>
+      </div>
+
+      <!-- Center Chat Stream -->
+      <div class="glass-panel flex-1 rounded-2xl flex flex-col overflow-hidden relative">
+        <div class="flex-1 overflow-y-auto p-6 space-y-4" id="chatArea">
+          <template x-for="(msg, i) in chatLog" :key="i">
+            <div class="chat" :class="msg.role === 'user' ? 'chat-end' : 'chat-start'">
+              <div class="chat-header text-[10px] opacity-50 mb-1"
+                x-text="msg.role === 'user' ? 'Operator' : (msg.role === 'tool' ? 'System Bridge' : 'Kernel Agent')">
+              </div>
+              <div class="chat-bubble text-sm prose prose-sm prose-invert shadow-xl"
+                :class="msg.role === 'user' ? 'bg-primary text-primary-content' : (msg.role === 'tool' ? 'bg-slate-800 text-gray-300 font-mono text-[10px]' : 'glass-panel text-base-content')"
+                x-html="msg.role === 'tool' ? ('<i>Action completed.</i><br>'+marked.parse(msg.content)) : marked.parse(msg.content)">
+              </div>
+            </div>
+          </template>
+          <div x-show="isExecuting" class="flex gap-2 items-center text-xs text-secondary italic px-4 py-2">
+            <span class="loading loading-spinner loading-sm"></span> Awaiting agent cognition cycle...
+          </div>
+        </div>
+
+        <!-- Chat Input -->
+        <div class="p-4 bg-slate-900/60 border-t border-white/5">
+          <div
+            class="join w-full bg-base-300 rounded-xl shadow-inner border border-white/10 focus-within:border-secondary transition-colors">
+            <input class="input input-ghost join-item flex-1 text-sm focus:outline-none bg-transparent"
+              placeholder="Instruct the agent..." x-model="userInput" @keyup.enter="dispatchTask()"
+              :disabled="!activeSession" />
+            <button class="btn btn-secondary join-item border-none" @click="dispatchTask()"
+              :disabled="!userInput || isExecuting || !activeSession">
+              <i data-lucide="send" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Sandbox Area (Dropzones) -->
+      <div class="glass-panel h-48 rounded-2xl p-4 flex flex-col shrink-0" x-show="activeSession">
+        <div class="flex justify-between items-center mb-2">
+          <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">Session Sandbox
+            Constraints</span>
+          <button class="btn btn-xs btn-outline btn-accent" @click="saveSessionConstraints()">Lock Sandbox
+            &rarr;</button>
+        </div>
+
+        <div class="flex gap-4 flex-1 h-full">
+          <div
+            class="flex-1 bg-black/30 rounded-xl border border-dashed border-white/20 p-2 flex flex-col relative overflow-hidden">
+            <span class="absolute top-2 left-3 text-[10px] text-white/40 font-mono">Allowed Skills</span>
+            <div id="drop-skills" class="flex-1 mt-4 overflow-y-auto space-y-1 p-1 min-h-[50px]"></div>
+          </div>
+
+          <div
+            class="flex-1 bg-black/30 rounded-xl border border-dashed border-white/20 p-2 flex flex-col relative overflow-hidden">
+            <span class="absolute top-2 left-3 text-[10px] text-white/40 font-mono">Bound MCP Servers</span>
+            <div id="drop-mcps" class="flex-1 mt-4 overflow-y-auto space-y-1 p-1 min-h-[50px]"></div>
+          </div>
+
+          <div
+            class="flex-1 bg-black/30 rounded-xl border border-dashed border-white/20 p-2 flex flex-col relative overflow-hidden">
+            <span class="absolute top-2 left-3 text-[10px] text-white/40 font-mono">Bound Workspaces</span>
+            <div id="drop-folders" class="flex-1 mt-4 overflow-y-auto space-y-1 p-1 min-h-[50px]"></div>
+          </div>
+        </div>
+      </div>
     </div>
-    
-    <!-- Toast Container -->
-    <div id="toasts" class="toast-container"></div>
-    
-    <script src="app.js"></script>
+
+
+    <!-- RIGHT PANE -->
+    <div class="w-1/3 flex flex-col gap-4 h-full">
+
+      <div class="tabs tabs-boxed bg-slate-900/40 p-1 border border-white/10 shrink-0">
+        <a class="tab tab-sm flex-1 transition-all"
+          :class="rightTab==='toolbox'?'tab-active bg-primary text-black font-bold':''"
+          @click="rightTab='toolbox'">Toolbox Engine</a>
+        <a class="tab tab-sm flex-1 transition-all"
+          :class="rightTab==='marketplace'?'tab-active bg-secondary text-black font-bold':''"
+          @click="rightTab='marketplace'">MCP Hub</a>
+        <a class="tab tab-sm flex-1 transition-all"
+          :class="rightTab==='provider'?'tab-active bg-accent text-black font-bold':''"
+          @click="rightTab='provider'">System Config</a>
+      </div>
+
+      <!-- TOOLBOX TAB (Draggables) -->
+      <div x-show="rightTab==='toolbox'" class="glass-panel flex-1 rounded-2xl flex flex-col p-4 overflow-hidden gap-4">
+        <!-- Skills -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+          <div class="flex justify-between items-center mb-2">
+            <span class="text-[11px] font-bold text-gray-400 tracking-wider">GLOBAL SKILL REGISTRY</span>
+            <button class="btn btn-xs btn-ghost" onclick="addSkillModal.showModal()"><i data-lucide="plus"
+                class="w-3 h-3"></i></button>
+          </div>
+          <div id="source-skills"
+            class="bg-black/20 rounded-lg flex-1 overflow-y-auto p-2 space-y-1 border border-white/5"></div>
+        </div>
+
+        <!-- MCPs -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+          <div class="flex justify-between items-center mb-2">
+            <span class="text-[11px] font-bold text-gray-400 tracking-wider">AVAILABLE MCP SERVERS</span>
+            <button class="btn btn-xs btn-ghost text-primary"
+              @click="document.getElementById('mcpHubModal').showModal()"><i data-lucide="blocks"
+                class="w-3 h-3"></i></button>
+          </div>
+          <div id="source-mcps"
+            class="bg-black/20 rounded-lg flex-1 overflow-y-auto p-2 space-y-1 border border-white/5"></div>
+        </div>
+
+        <!-- Folders -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+          <div class="flex justify-between items-center mb-2">
+            <span class="text-[11px] font-bold text-gray-400 tracking-wider">LOCAL FOLDERS</span>
+            <button class="btn btn-xs btn-ghost text-secondary" @click="addNativeFolder()"><i data-lucide="folder-plus"
+                class="w-3 h-3"></i></button>
+          </div>
+          <div id="source-folders"
+            class="bg-black/20 rounded-lg flex-1 overflow-y-auto p-2 space-y-1 border border-white/5"></div>
+        </div>
+      </div>
+
+
+
+      <!-- PROVIDERS & SETTINGS TAB -->
+      <div x-show="rightTab==='provider'" class="glass-panel flex-1 rounded-2xl p-6 overflow-y-auto space-y-6">
+
+        <!-- System Features Config -->
+        <div class="bg-black/20 p-4 rounded-xl border border-white/5">
+          <h3 class="text-xs font-bold text-accent tracking-widest uppercase mb-4 flex items-center gap-2">
+            <i data-lucide="network" class="w-4 h-4"></i> Mesh Architecture
+          </h3>
+
+          <div class="space-y-3">
+            <label class="cursor-pointer label">
+              <span class="label-text text-xs">A2A Peer-to-Peer Mesh</span>
+              <input type="checkbox" class="toggle toggle-accent toggle-sm" x-model="sysConfig.mesh_p2p"
+                @change="patchSystemConfig('mesh_p2p')" />
+            </label>
+            <label class="cursor-pointer label">
+              <span class="label-text text-xs">GTM Autonomous Swarm</span>
+              <input type="checkbox" class="toggle toggle-accent toggle-sm" x-model="sysConfig.gtm_swarm"
+                @change="patchSystemConfig('gtm_swarm')" />
+            </label>
+            <label class="cursor-pointer label">
+              <span class="label-text text-xs">SRE Watchdog Swarm</span>
+              <input type="checkbox" class="toggle toggle-accent toggle-sm" x-model="sysConfig.sre_swarm"
+                @change="patchSystemConfig('sre_swarm')" />
+            </label>
+          </div>
+        </div>
+
+        <!-- LLM Config -->
+        <div>
+          <h3 class="text-xs font-bold text-gray-400 tracking-widest uppercase mb-4">Inference Provider</h3>
+          <label class="form-control w-full mb-3">
+            <div class="label"><span class="label-text text-xs">Primary Vendor / Model</span></div>
+            <select class="select select-bordered select-sm w-full bg-base-300" x-model="activeModel"
+              @change="patchModelConfig()">
+              <option value="ollama/qwen2.5-coder:7b-instruct-q4_K_M">Local via Ollama (Qwen2.5)</option>
+              <option value="anthropic/claude-3-5-sonnet-20241022">Anthropic (Claude 3.5 Sonnet)</option>
+              <option value="openai/gpt-4o">OpenAI (GPT-4o)</option>
+              <option value="google/gemini-2.5-pro">Google (Gemini 2.5 Pro)</option>
+            </select>
+          </label>
+
+          <label class="form-control w-full mb-3" x-show="activeModel.startsWith('anthropic')">
+            <div class="label"><span class="label-text text-xs">Anthropic API Key</span></div>
+            <input type="password" class="input input-sm input-bordered w-full bg-base-300" x-model="apiKeys.anthropic"
+              @change="patchModelConfig()" placeholder="sk-ant-...">
+          </label>
+
+          <label class="form-control w-full mb-3" x-show="activeModel.startsWith('openai')">
+            <div class="label"><span class="label-text text-xs">OpenAI API Key</span></div>
+            <input type="password" class="input input-sm input-bordered w-full bg-base-300" x-model="apiKeys.openai"
+              @change="patchModelConfig()" placeholder="sk-...">
+          </label>
+        </div>
+
+        <div>
+          <h3 class="text-xs font-bold text-gray-400 tracking-widest uppercase mb-4 mt-6">Active Sessions</h3>
+          <div class="space-y-2">
+            <template x-for="s in loadedSessions" :key="s.id">
+              <div class="flex items-center justify-between p-3 rounded-lg border transition-colors group"
+                :class="activeSession?.id === s.id ? 'border-primary bg-primary/10' : 'border-white/10 hover:border-white/30 bg-black/20'">
+                <div class="flex-1 cursor-pointer" @click="switchSession(s)">
+                  <div class="text-sm font-semibold" x-text="s.user_id"></div>
+                </div>
+                <button class="btn btn-ghost btn-xs text-error opacity-0 group-hover:opacity-100 transition-opacity"
+                  @click.stop="deleteSession(s.id)">
+                  <i data-lucide="trash-2" class="w-4 h-4"></i>
+                </button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- MODALS -->
+  <dialog id="mcpHubModal" class="modal">
+    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content max-w-2xl">
+      <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button></form>
+      <h3 class="font-bold text-lg text-primary flex items-center gap-2 mb-4"><i data-lucide="globe"
+          class="w-5 h-5"></i> Community MCP Hub</h3>
+
+      <div class="flex justify-between items-center mb-4">
+        <p class="text-xs text-gray-400">1-click install verified Model Context Protocols.</p>
+        <button class="btn btn-xs btn-outline btn-secondary" onclick="addMcpModal.showModal()">Custom CLI Link</button>
+      </div>
+
+      <div class="space-y-3 max-h-[50vh] overflow-y-auto pr-2">
+        <template x-for="m in marketplaceList" :key="m.name">
+          <div class="bg-black/20 p-4 rounded-xl border border-white/10 hover:border-secondary/50 transition-colors">
+            <div class="flex justify-between items-start mb-2">
+              <div class="font-bold text-sm text-white flex items-center gap-2">
+                <i data-lucide="blocks" class="w-4 h-4 text-secondary"></i> <span x-text="m.name"></span>
+              </div>
+              <button class="btn btn-xs btn-secondary" @click="oneClickInstall(m)">Install</button>
+            </div>
+            <div class="text-[10px] text-gray-400 leading-relaxed mb-2" x-text="m.desc"></div>
+            <div class="text-[9px] font-mono text-gray-500 truncate" x-text="m.cmd"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+  </dialog>
+
+  <dialog id="addMcpModal" class="modal">
+    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content">
+      <h3 class="font-bold text-lg text-primary flex items-center gap-2"><i data-lucide="terminal" class="w-5 h-5"></i>
+        Custom MCP Registration</h3>
+      <p class="py-4 text-xs text-gray-400">Provide direct CLI arguments for an unlisted MCP module.</p>
+
+      <input type="text" x-model="newMcp.name" placeholder="Name Alias (e.g., custom-postgres)"
+        class="input input-sm input-bordered w-full bg-base-300 mb-2" />
+      <input type="text" x-model="newMcp.command" placeholder="Command (e.g., npx)"
+        class="input input-sm input-bordered w-full bg-base-300 mb-2" />
+      <input type="text" x-model="newMcp.args" placeholder="Args (-y, @modelcontextprotocol/server-postgres, ...)"
+        class="input input-sm input-bordered w-full bg-base-300 mb-4" />
+
+      <div class="modal-action">
+        <form method="dialog"><button class="btn btn-sm btn-ghost">Cancel</button></form>
+        <button class="btn btn-sm btn-primary" @click="registerNewMCP()">Compile Server</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="addFolderModal" class="modal">
+    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content">
+      <h3 class="font-bold text-lg text-accent flex items-center gap-2"><i data-lucide="folder-plus"
+          class="w-5 h-5"></i> Mount Local Workspace</h3>
+      <p class="py-4 text-xs text-gray-400">Provide an absolute path to your local repository.</p>
+
+      <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
+        <span class="badge badge-accent badge-outline cursor-pointer"
+          @click="newFolder='./workspace'">./workspace</span>
+        <span class="badge badge-accent badge-outline cursor-pointer" @click="newFolder='C:/temp'">C:/temp</span>
+        <span class="badge badge-accent badge-outline cursor-pointer" @click="newFolder='/tmp'">/tmp</span>
+      </div>
+      <input type="text" x-model="newFolder" placeholder="Absolute Local Path"
+        class="input input-sm input-bordered w-full bg-base-300" />
+
+      <div class="modal-action">
+        <form method="dialog"><button class="btn btn-sm btn-ghost">Cancel</button></form>
+        <button class="btn btn-sm btn-accent" @click="registerLocalFolder()">Mount Path</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="addSkillModal" class="modal">
+    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content">
+      <h3 class="font-bold text-lg text-yellow-500 flex items-center gap-2"><i data-lucide="braces" class="w-5 h-5"></i>
+        Agentic Skill Generator</h3>
+      <p class="py-4 text-xs text-gray-400">The LLM will compile a new native python Python skill function based on your
+        prompt.</p>
+      <input type="text" x-model="newSkillDesc" placeholder="Describe the skill (e.g., A tool to scrape weather data)"
+        class="input input-sm input-bordered w-full bg-base-300 mb-4" />
+
+      <div class="modal-action">
+        <form method="dialog"><button class="btn btn-sm btn-ghost">Cancel</button></form>
+        <button class="btn btn-sm btn-warning"
+          @click="alert('Skill Generator AI is booting up... (Backend integration required)'); addSkillModal.close();">Generate
+          Code</button>
+      </div>
+    </div>
+  </dialog>
 </body>
+
 </html>

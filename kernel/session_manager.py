@@ -42,6 +42,9 @@ class SessionContext:
         self.task_history: List[str] = []
         self.file_history: List[str] = []
         self.command_history: List[str] = []
+        self.skills: List[str] = getattr(self, "skills", [])
+        self.mcp_servers: List[str] = getattr(self, "mcp_servers", [])
+        self.folders: List[str] = getattr(self, "folders", [])
         self.conversation_messages: List[Dict] = []  # NEW: conversation memory
         self.is_active = True
 
@@ -100,6 +103,9 @@ class SessionContext:
             "file_history": self.file_history,
             "command_history": self.command_history,
             "conversation_messages": self.conversation_messages,
+            "skills": getattr(self, "skills", []),
+            "mcp_servers": getattr(self, "mcp_servers", []),
+            "folders": getattr(self, "folders", [])
         }
 
     @classmethod
@@ -120,6 +126,9 @@ class SessionContext:
         session.command_history = data.get("command_history", [])
         session.conversation_messages = data.get("conversation_messages", [])
         session.is_active = data.get("is_active", not data.get("context", {}).get("ended", False))
+        session.skills = data.get("skills", [])
+        session.mcp_servers = data.get("mcp_servers", [])
+        session.folders = data.get("folders", [])
         return session
 
 
@@ -203,6 +212,11 @@ class SessionManager:
         session = self.get_session(session_id)
         if session:
             session.update_activity()
+            self._save_to_db(session)
+
+    def update_session(self, session_id: str, session: SessionContext):
+        if session_id in self.sessions:
+            self.sessions[session_id] = session
             self._save_to_db(session)
 
     def add_task_to_session(self, session_id: str, task_id: str):

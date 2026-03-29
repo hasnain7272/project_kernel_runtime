@@ -85,11 +85,13 @@ class TaskStep:
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'TaskStep':
+        status_raw = data.get("status", "pending")
+        status_enum = TaskStatus(status_raw) if isinstance(status_raw, str) else status_raw
         step = cls(
             id=data["id"],
             description=data["description"],
             tools=data["tools"],
-            status=TaskStatus(data["status"]),
+            status=status_enum,
             result=data.get("result"),
             error=data.get("error"),
             max_retries=data.get("max_retries", 2),
@@ -189,12 +191,14 @@ class Task:
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'Task':
+        type_val = data.get("type", "custom")
+        type_enum = TaskType(type_val) if isinstance(type_val, str) else type_val
         task = cls(
             id=data["id"],
-            type=TaskType(data["type"]),
+            type=type_enum,
             description=data["description"],
             steps=[TaskStep.from_dict(s) for s in data["steps"]],
-            status=TaskStatus(data["status"]),
+            status=TaskStatus(data["status"]) if isinstance(data.get("status"), str) else TaskStatus.PENDING,
             context=data.get("context", {}),
             session_id=data.get("session_id"),
         )
@@ -368,6 +372,21 @@ class TaskStateMachine:
             task.status = TaskStatus.CANCELLED
             self._save_to_db(task)
 
+    async def transition_task(self, task_id: str, status: TaskStatus, details: Optional[Dict[str, Any]] = None):
+        """Compatibility helper for older service code."""
+        task = self.get_task(task_id)
+        if not task:
+            return None
+
+        task.status = status
+        task.updated_at = datetime.now(timezone.utc)
+        if details and "error" in details:
+            task.error = str(details["error"])
+
+        self._save_to_db(task)
+        await self._emit_event(f"task.{status.value}", task)
+        return task
+
     def list_tasks(self, status: Optional[TaskStatus] = None,
                    session_id: Optional[str] = None) -> List[Task]:
         tasks = list(self.tasks.values())
@@ -389,7 +408,10 @@ class TaskStateMachine:
                      total_duration_ms, error, context, steps, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    task.id, task.type.value, task.description, task.status.value,
+                    task.id, 
+                    task.type.value if hasattr(task.type, "value") else str(task.type),
+                    task.description, 
+                    task.status.value if hasattr(task.status, "value") else str(task.status),
                     task.session_id, task.current_step_index, task.total_duration_ms,
                     task.error, json.dumps(task.context),
                     json.dumps([s.to_dict() for s in task.steps]),

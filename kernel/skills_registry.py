@@ -83,22 +83,6 @@ CORE_SKILLS = [
 ]
 
 # Domain Packs
-BLENDER_PACK_SKILLS = [
-    Skill(
-        name="blender_geometry",
-        description="Geometry nodes, modifiers",
-        tools=["geometry_nodes_script", "apply_modifier"],
-        level=SkillLevel.EXECUTE,
-        pack="blender"
-    ),
-    Skill(
-        name="blender_animation",
-        description="Keyframes, armature, cloth sim",
-        tools=["keyframe_add", "bake_simulation"],
-        level=SkillLevel.EXECUTE,
-        pack="blender"
-    ),
-]
 
 CODING_PACK_SKILLS = [
     Skill(
@@ -126,7 +110,7 @@ class SkillRegistry:
 
     def load_defaults(self):
         """Load core 7 skills + optional packs"""
-        for skill in CORE_SKILLS + BLENDER_PACK_SKILLS + CODING_PACK_SKILLS:
+        for skill in CORE_SKILLS + CODING_PACK_SKILLS:
             self.skills[skill.name] = skill
 
     def get_skill(self, name: str) -> Skill:

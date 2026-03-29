@@ -15,11 +15,31 @@ Claude Code agentic loop, Aider architect/editor dual model
 
 import asyncio
 import logging
+import os
 from functools import cached_property
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+class VectorDBFacade:
+    """Unified memory and codebase indexing services."""
+
+    def __init__(self, config):
+        from project_kernel_runtime.memory.chroma_store import (
+            AgentMemory,
+            ChromaVectorStore,
+            CodebaseRAG,
+        )
+
+        persist_dir = getattr(config, "persist_dir", "./data/chroma_db") if config else "./data/chroma_db"
+        shared_store = ChromaVectorStore(persist_dir=persist_dir)
+        self.agent_memory = AgentMemory(shared_store)
+        self.codebase_rag = CodebaseRAG(
+            persist_dir=os.path.join(persist_dir, "codebase_index")
+        )
+        self.persist_dir = persist_dir
 
 
 class Orchestrator:
@@ -99,6 +119,17 @@ class Orchestrator:
         logger.info("[Orchestrator] SessionManager initialized")
         return mgr
 
+    @property
+    def session_manager(self):
+        """Compatibility alias for older service code."""
+        return self.sessions
+
+    @cached_property
+    def vector_db(self):
+        facade = VectorDBFacade(getattr(self.config, "vector_db", None))
+        logger.info("[Orchestrator] VectorDB facade initialized")
+        return facade
+
     @cached_property
     def llm(self):
         from project_kernel_runtime.cognition.llm_provider import LLMProvider
@@ -140,7 +171,13 @@ class Orchestrator:
     def mcp_client(self):
         from project_kernel_runtime.protocols.mcp_client import MCPClient
         mcp_cfg = getattr(self.config, 'mcp', None)
-        url = getattr(mcp_cfg, 'server_url', 'ws://localhost:3000') if mcp_cfg else 'ws://localhost:3000'
+        url = getattr(mcp_cfg, 'server_url', None) if mcp_cfg else None
+        if not url and mcp_cfg and getattr(mcp_cfg, "transport", "") == "websocket":
+            host = getattr(mcp_cfg, "host", "127.0.0.1")
+            port = getattr(mcp_cfg, "port", 3000)
+            url = f"ws://{host}:{port}"
+        if not url:
+            url = "ws://localhost:3000"
         client = MCPClient(url)
         logger.info("[Orchestrator] MCPClient initialized")
         return client
@@ -255,7 +292,7 @@ class Orchestrator:
 
         # Connect MCP if configured
         mcp_cfg = getattr(self.config, 'mcp', None)
-        if mcp_cfg and getattr(mcp_cfg, 'enabled', False):
+        if mcp_cfg and getattr(mcp_cfg, 'enabled', False) and getattr(mcp_cfg, "transport", "") == "websocket":
             try:
                 await self.mcp_client.connect()
                 logger.info("[Orchestrator] MCP connected")
@@ -346,6 +383,12 @@ class Orchestrator:
             LLMMessage(role="system", content=self._build_system_prompt()),
             LLMMessage(role="user", content=task_description),
         ]
+        
+        if session_id and hasattr(self.sessions, 'add_message_to_session'):
+            session = self.sessions.get_session(session_id)
+            last_message = session.conversation_messages[-1] if session and session.conversation_messages else None
+            if not last_message or last_message.get("role") != "user" or last_message.get("content") != task_description:
+                self.sessions.add_message_to_session(session_id, "user", task_description)
 
         iteration = 0
         results = []
@@ -369,6 +412,9 @@ class Orchestrator:
                     content=response.content or "",
                     tool_calls=response.tool_calls,
                 ))
+                
+                if session_id and response.content and hasattr(self.sessions, 'add_message_to_session'):
+                    self.sessions.add_message_to_session(session_id, "assistant", response.content)
 
                 valid_tools_this_iteration = False
                 iteration_success = True
@@ -434,6 +480,8 @@ class Orchestrator:
                 # treat as text response and return content
                 if not valid_tools_this_iteration:
                     if response.content:
+                        if session_id and hasattr(self.sessions, 'add_message_to_session'):
+                            self.sessions.add_message_to_session(session_id, "assistant", response.content)
                         task.status = "completed"
                         self.tasks.save_task(task)
                         return {
@@ -454,6 +502,8 @@ class Orchestrator:
 
             else:
                 # No tool calls — LLM is done, return final response
+                if session_id and response.content and hasattr(self.sessions, 'add_message_to_session'):
+                    self.sessions.add_message_to_session(session_id, "assistant", response.content)
                 task.status = "completed"
                 self.tasks.save_task(task)
 
@@ -540,6 +590,17 @@ class Orchestrator:
         if session:
             self.sessions.end_session(session.session_id)
             self.active_sessions.pop(user_id, None)
+
+    async def get_session_context(self, identifier: str):
+        """Resolve a session by session_id first, then by user_id."""
+        session = self.sessions.get_session(identifier)
+        if session:
+            return session
+
+        if identifier in self.active_sessions:
+            return self.active_sessions[identifier]
+
+        return self.sessions.get_active_session(identifier)
 
     # ════════════════════════════════════════════════════════════════════
     # Task Management
@@ -652,11 +713,13 @@ class Orchestrator:
         if session_id:
             self.sessions.update_session_activity(session_id)
 
-        tc = TC(tool_name=tool_name, arguments=arguments)
+        tc = TC(name=tool_name, arguments=arguments, session_id=session_id, user_id=user_id)
+        session = self.sessions.get_session(session_id) if session_id else None
         ctx = ExecutionContext(
             user_id=user_id,
             session_id=session_id or "default",
-            mode=self.config.mode if hasattr(self.config, 'mode') else "build",
+            execution_mode=self.config.mode if hasattr(self.config, 'mode') else "build",
+            workspace_path=session.workspace_path if session else ".",
         )
 
         result = await self.tool_executor.execute(tc, ctx)
@@ -789,7 +852,7 @@ class Orchestrator:
 
     async def get_available_skills(self, user_id: str) -> List[str]:
         all_skills = []
-        for pack in ["core", "blender", "coding"]:
+        for pack in ["core", "coding"]:
             try:
                 pack_skills = self.skills.list_skills(pack)
                 for skill in pack_skills:

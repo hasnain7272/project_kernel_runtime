@@ -102,6 +102,36 @@ class CreditsEngine:
         usage = self.get_usage(tenant_id)
         return {"tenant_id": tenant_id, "usage": usage, "period": "last_30d"}
 
+    def get_balance(self, tenant_id: str) -> Dict[str, int]:
+        """Return a simple remaining-quota view for UI compatibility."""
+        usage = self.get_usage(tenant_id)
+        defaults = {
+            "max_tool_calls": 10000,
+            "max_tokens": 1000000,
+            "max_compute_sec": 3600,
+        }
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT max_tool_calls, max_tokens, max_compute_sec FROM quotas WHERE tenant_id = ?",
+                    (tenant_id,),
+                ).fetchone()
+                if row:
+                    defaults = {
+                        "max_tool_calls": row[0],
+                        "max_tokens": row[1],
+                        "max_compute_sec": row[2],
+                    }
+        except Exception:
+            pass
+
+        return {
+            "tool_calls_remaining": max(0, defaults["max_tool_calls"] - usage.get("tool_call", 0)),
+            "tokens_remaining": max(0, defaults["max_tokens"] - usage.get("tokens", 0)),
+            "compute_seconds_remaining": max(0, defaults["max_compute_sec"] - usage.get("wasm_compute_sec", 0)),
+        }
+
 
 # Global instance
 credits_engine = CreditsEngine()

@@ -112,6 +112,18 @@ class MCPClient:
                 )
                 self.tools[tool.name] = tool
 
+    async def list_tools(self) -> List[Dict[str, Any]]:
+        """Refresh and return available tools in MCP schema form."""
+        await self._list_tools()
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+            }
+            for tool in self.tools.values()
+        ]
+
     async def _list_resources(self):
         """List available resources"""
         request = {

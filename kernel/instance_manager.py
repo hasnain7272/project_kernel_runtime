@@ -10,7 +10,6 @@ class InstanceManager:
     """
     def __init__(self):
         self.app_registry = {
-            "blender": {"proc_name": "blender", "path": "blender"},
             "browser": {"proc_name": "chrome", "path": "google-chrome"},
             "unity": {"proc_name": "unity", "path": "unity"}
         }
