@@ -15,7 +15,7 @@
   <script src="https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.fog.min.js"></script>
 
   <!-- UX/UI Tools -->
-  <script defer src="/ui/app.js"></script>
+    <script defer src="/ui/app.js?v=3"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -142,10 +142,18 @@
       </div>
 
       <!-- Bottom Sandbox Area (Dropzones) -->
-      <div class="glass-panel h-48 rounded-2xl p-4 flex flex-col shrink-0" x-show="activeSession">
+      <div class="glass-panel h-48 rounded-2xl p-4 flex flex-col shrink-0" x-show="activeSession" x-cloak>
         <div class="flex justify-between items-center mb-2">
-          <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">Session Sandbox
-            Constraints</span>
+          <div class="flex items-center gap-4">
+            <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">Session Sandbox Bounds</span>
+            <select class="select select-bordered select-xs bg-base-300 text-xs"
+              :value="activeSession ? activeSession.risk_mode : 'auto'"
+              @change="activeSession && (activeSession.risk_mode = $event.target.value, patchSessionConfig())">
+              <option value="auto">Risk Mode: Auto</option>
+              <option value="ask">Risk Mode: Ask (Approval)</option>
+              <option value="bypass">Risk Mode: Bypass</option>
+            </select>
+          </div>
           <button class="btn btn-xs btn-outline btn-accent" @click="saveSessionConstraints()">Lock Sandbox
             &rarr;</button>
         </div>

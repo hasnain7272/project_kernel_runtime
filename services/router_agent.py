@@ -32,6 +32,7 @@ def _session_payload(session) -> Dict[str, Any]:
         "user_id": session.user_id,
         "workspace_path": session.workspace_path,
         "mode": session.mode,
+        "risk_mode": getattr(session, "risk_mode", "auto"),
         "skills": getattr(session, "skills", []),
         "mcp_servers": getattr(session, "mcp_servers", []),
         "folders": getattr(session, "folders", []),
@@ -186,6 +187,8 @@ async def patch_session(session_id: str, request: Dict[str, Any]):
         session.folders = list(dict.fromkeys(request.get("folders", [])))
     if "mode" in request and request["mode"]:
         session.mode = request["mode"]
+    if "risk_mode" in request and request["risk_mode"]:
+        session.risk_mode = request["risk_mode"]
 
     orchestrator.sessions.update_session(session_id, session)
     return _session_payload(session)

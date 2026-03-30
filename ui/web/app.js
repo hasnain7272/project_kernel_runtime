@@ -71,7 +71,14 @@ function kernelUI() {
         if (this.activeSession) {
           const refreshed = this.loadedSessions.find(s => (s.id || s.session_id) === (this.activeSession.id || this.activeSession.session_id));
           if (refreshed) {
-            this.activeSession = refreshed;
+            // Preserve local UI state while merging fresh data
+            this.activeSession = {
+              ...refreshed,
+              risk_mode: refreshed.risk_mode || this.activeSession.risk_mode || "auto",
+              skills: this.activeSession.skills || refreshed.skills || [],
+              mcp_servers: this.activeSession.mcp_servers || refreshed.mcp_servers || [],
+              folders: this.activeSession.folders || refreshed.folders || []
+            };
           }
         }
       } catch (e) {
@@ -165,7 +172,13 @@ function kernelUI() {
     },
 
     async switchSession(session) {
-      this.activeSession = { ...session, skills: session.skills || [], mcp_servers: session.mcp_servers || [], folders: session.folders || [] };
+      this.activeSession = {
+        ...session,
+        risk_mode: session.risk_mode || "auto",
+        skills: session.skills || [],
+        mcp_servers: session.mcp_servers || [],
+        folders: session.folders || []
+      };
       this.renderDraggables("drop-skills", this.activeSession.skills, "zap", "text-yellow-500");
       this.renderDraggables("drop-mcps", this.activeSession.mcp_servers, "server", "text-primary");
       this.renderDraggables("drop-folders", this.activeSession.folders, "folder", "text-accent");
@@ -183,7 +196,7 @@ function kernelUI() {
         const data = await this.api(`/sessions/${sid}/history`);
         const history = data.history || data.messages || [];
         if (!Array.isArray(history)) return;
-        if (history.length < this.chatLog.length && this.isExecuting) return;
+        // Always update if history is different from local state
         if (JSON.stringify(this.chatLog) !== JSON.stringify(history)) {
           this.chatLog = history;
           this.isExecuting = false;
@@ -224,10 +237,23 @@ function kernelUI() {
             folders: Array.from(new Set(ids("drop-folders")))
           })
         });
-        this.activeSession = updated;
+        this.activeSession = { ...this.activeSession, ...updated };
         alert("Constraints permanently serialized!");
       } catch (e) {
         console.error(e);
+      }
+    },
+
+    async patchSessionConfig() {
+      if (!this.activeSession) return;
+      const sid = this.activeSession.id || this.activeSession.session_id;
+      try {
+        await this.api(`/sessions/${sid}`, {
+          method: "PATCH",
+          body: JSON.stringify({ risk_mode: this.activeSession.risk_mode })
+        });
+      } catch (e) {
+        console.error("Failed to patch session risk_mode", e);
       }
     },
 
@@ -237,6 +263,7 @@ function kernelUI() {
       if (!q) return;
       this.userInput = "";
       this.isExecuting = true;
+      // Optimistically add user message locally (will be overwritten by server history)
       this.chatLog = [...this.chatLog, { role: "user", content: q }];
       this.scrollToBottom();
 
@@ -251,7 +278,18 @@ function kernelUI() {
             max_iterations: 8
           })
         });
-        await this.pollHistory();
+        // Wait a moment for the task to start, then poll
+        setTimeout(() => this.pollHistory(), 500);
+        // Set up polling until execution completes
+        const pollUntilDone = () => {
+          if (!this.isExecuting) return;
+          this.pollHistory().then(() => {
+            if (this.isExecuting) {
+              setTimeout(pollUntilDone, 1000);
+            }
+          });
+        };
+        setTimeout(pollUntilDone, 1000);
       } catch (e) {
         console.error("Pipeline failure.", e);
         this.isExecuting = false;

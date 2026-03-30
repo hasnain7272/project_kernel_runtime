@@ -249,109 +249,63 @@ class GovernanceEngine:
     def check_tool_allowed(
         self,
         tool_name: str,
-        mode: str,
-        task_id: str = "",
-        user_role: str = "developer",
+        context,
     ) -> PolicyDecision:
         """
-        Check if a tool is allowed in the given mode and role.
-        
-        Real enforcement — not a stub. Returns DENY for unauthorized access.
+        Check if a tool is allowed in the given session context.
         """
-        mode_str = mode if isinstance(mode, str) else mode.value
-        mode_policy = self.policy_matrix.get(mode_str, {})
-        
-        if not mode_policy:
-            # If mode unknown, default to deny-all except read_only
-            mutability = self._classify_tool(tool_name)
-            if mutability == "read_only":
-                decision = PolicyDecision.ALLOW
-            else:
-                decision = PolicyDecision.DENY
-                self._log_audit(
-                    tool_name=tool_name, mode=mode_str, decision=decision,
-                    user_role=user_role, reason="UNKNOWN_MODE", task_id=task_id
-                )
-                return decision
-        
-        # Check mutability against mode policy
+        # Feature gate
+        if "__" in tool_name and "mcp" not in context.enabled_features:
+            self._log_audit(
+                tool_name=tool_name, mode=context.risk_mode, decision=PolicyDecision.DENY,
+                user_role=context.user_role, reason="MCP_DISABLED", task_id=context.task_id
+            )
+            return PolicyDecision.DENY
+
         mutability = self._classify_tool(tool_name)
         decision = PolicyDecision.ALLOW
         reason_code = None
         
-        if mutability == "read_only":
-            decision = PolicyDecision.ALLOW
-        elif mutability == "write":
-            mode_allows = mode_policy.get("write", False)
-            if isinstance(mode_allows, bool):
-                if not mode_allows:
-                    decision = PolicyDecision.DENY
-                    reason_code = "MODE_NO_WRITE"
-            else:
-                if not mode_allows:
-                    decision = PolicyDecision.DENY
-                    reason_code = "MODE_NO_WRITE"
-        elif mutability == "execute":
-            mode_allows = mode_policy.get("execute", False)
-            if isinstance(mode_allows, bool):
-                if not mode_allows:
-                    decision = PolicyDecision.DENY
-                    reason_code = "MODE_NO_EXECUTE"
-            else:
-                if not mode_allows:
-                    decision = PolicyDecision.DENY
-                    reason_code = "MODE_NO_EXECUTE"
-        elif mutability == "network":
-            mode_allows = mode_policy.get("network", False)
-            if isinstance(mode_allows, bool):
-                if not mode_allows:
-                    decision = PolicyDecision.DENY
-                    reason_code = "NETWORK_DISALLOWED"
-            else:
-                if not mode_allows:
-                    decision = PolicyDecision.DENY
-                    reason_code = "NETWORK_DISALLOWED"
+        # Check risk_mode
+        if mutability != "read_only":
+            if context.risk_mode == "ask":
+               # require human approval for all mutations
+               decision = PolicyDecision.REQUIRE_APPROVAL
+            elif context.user_role == "viewer":
+               decision = PolicyDecision.DENY
+               reason_code = "ROLE_NO_MUTATION"
         
-        # Log and return
         self._log_audit(
-            tool_name=tool_name, mode=mode_str, decision=decision,
-            user_role=user_role, reason=reason_code, task_id=task_id
+            tool_name=tool_name, mode=context.risk_mode, decision=decision,
+            user_role=context.user_role, reason=reason_code, task_id=context.task_id
         )
         return decision
     
     def check_permission(
         self,
         tool_name: str,
-        user_role: str = "developer",
-        execution_mode: str = "build",
+        context,
         mutability: str = None,
         **kwargs,
-    ) -> bool:
+    ) -> PolicyDecision:
         """
         Unified permission check (used by ToolExecutor).
-        
-        Checks:
-        1. Role has access to this tool
-        2. Mode allows this mutability level
         """
         # Role check
         try:
-            role = UserRole(user_role)
+            role = UserRole(context.user_role)
         except ValueError:
             role = UserRole.DEVELOPER
         
         allowed_roles = TOOL_ROLE_PERMISSIONS.get(tool_name)
         if allowed_roles and role not in allowed_roles:
-            logger.info(f"[Governance] DENIED: role '{user_role}' cannot use '{tool_name}'")
-            return False
-        
-        # Mode check
-        decision = self.check_tool_allowed(
+            logger.info(f"[Governance] DENIED: role '{context.user_role}' cannot use '{tool_name}'")
+            return PolicyDecision.DENY
+            
+        return self.check_tool_allowed(
             tool_name=tool_name,
-            mode=execution_mode,
-            user_role=user_role,
+            context=context,
         )
-        return decision == PolicyDecision.ALLOW
     
     def requires_approval(self, tool_name: str) -> bool:
         """Check if a tool requires human approval before execution."""
@@ -482,7 +436,18 @@ class GovernanceEngine:
     
     def _classify_tool(self, tool_name: str) -> str:
         """Classify tool by its mutability level."""
-        return TOOL_MUTABILITY.get(tool_name, "read_only")
+        if tool_name in TOOL_MUTABILITY:
+            return TOOL_MUTABILITY[tool_name]
+        
+        # Heuristics for MCP tools
+        if "__" in tool_name:
+            if "read" in tool_name or "list" in tool_name or "search" in tool_name or "get" in tool_name:
+                return "read_only"
+            if "fetch" in tool_name or "url" in tool_name:
+                return "network"
+            return "execute" # Fallback mutability for safety
+            
+        return "read_only"
     
     def _log_audit(self, tool_name: str, mode: str, decision: PolicyDecision,
                     user_role: str = None, reason: str = None,

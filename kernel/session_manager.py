@@ -36,6 +36,7 @@ class SessionContext:
         self.user_id = user_id
         self.workspace_path = workspace_path
         self.mode = mode
+        self.risk_mode = context.get("risk_mode", "auto") if context else "auto"
         self.context = context or {}
         self.created_at = datetime.now(timezone.utc)
         self.last_active = datetime.now(timezone.utc)
@@ -95,6 +96,7 @@ class SessionContext:
             "user_id": self.user_id,
             "workspace_path": self.workspace_path,
             "mode": self.mode,
+            "risk_mode": getattr(self, "risk_mode", "auto"),
             "context": self.context,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat(),
@@ -117,6 +119,7 @@ class SessionContext:
             mode=data.get("mode", "cli"),
             context=data.get("context", {})
         )
+        session.risk_mode = data.get("risk_mode", "auto")
         if "created_at" in data:
             session.created_at = datetime.fromisoformat(data["created_at"])
         if "last_active" in data:

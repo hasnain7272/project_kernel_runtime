@@ -75,9 +75,10 @@ class ExecutionContext:
     task_id: str = ""
     user_id: str = "system"
     user_role: str = "developer"
-    execution_mode: str = "build"  # plan, review, research, build
+    risk_mode: str = "auto"  # auto, ask, bypass
     workspace_path: str = "."
     environment: Dict[str, str] = field(default_factory=dict)
+    enabled_features: List[str] = field(default_factory=lambda: ["mcp", "skills", "llms", "a2a"])
 
 
 # ============================================================================
@@ -95,12 +96,12 @@ class ToolExecutor:
     4. Audit + Event — log and publish result
     """
     
-    def __init__(self, governance=None, sandbox=None, event_bus=None, mcp_client=None):
+    def __init__(self, governance=None, sandbox=None, event_bus=None, mcp_bridge=None):
         self._tools: Dict[str, Any] = {}  # name -> BaseTool instance
         self.governance = governance
         self.sandbox = sandbox
         self.event_bus = event_bus
-        self.mcp_client = mcp_client
+        self.mcp_bridge = mcp_bridge
         logger.info("[ToolExecutor] Initialized")
     
     def register_tool(self, tool) -> None:
@@ -167,10 +168,11 @@ class ToolExecutor:
         
         # ── Step 3: Route and execute ──
         try:
-            if tool_call.is_mcp_tool and self.mcp_client:
-                # Execute via MCP client
-                result_data = await self.mcp_client.call_tool(
-                    tool_call.mcp_server, tool_call.name, tool_call.arguments
+            if "__" in tool_call.name and getattr(self, "mcp_bridge", None):
+                # Execute via MCP bridge
+                server_name, mcp_tool_name = tool_call.name.split("__", 1)
+                result_data = await self.mcp_bridge.call_tool(
+                    server_name, mcp_tool_name, tool_call.arguments
                 )
                 result = ToolResult(
                     tool_call_id=tool_call.id,
@@ -237,17 +239,22 @@ class ToolExecutor:
                                  context: ExecutionContext) -> PolicyDecision:
         """Check governance policy for a tool call."""
         try:
+            # 1. Feature Gate for MCP
+            if "__" in tool_call.name:
+                if "mcp" not in context.enabled_features:
+                    logger.warning(f"[Governance] DENIED: MCP tools are disabled for this session.")
+                    return PolicyDecision.DENY
+
             tool = self._tools.get(tool_call.name)
             mutability = getattr(tool, 'mutability', ToolMutability.READ_ONLY) if tool else ToolMutability.READ_ONLY
             
-            allowed = self.governance.check_permission(
+            decision = self.governance.check_permission(
                 tool_name=tool_call.name,
-                user_role=context.user_role,
-                execution_mode=context.execution_mode,
+                context=context,
                 mutability=str(mutability),
             )
             
-            if not allowed:
+            if decision == PolicyDecision.DENY:
                 return PolicyDecision.DENY
             
             # Check if tool requires approval
@@ -255,7 +262,7 @@ class ToolExecutor:
                 if self.governance.requires_approval(tool_call.name):
                     return PolicyDecision.REQUIRE_APPROVAL
             
-            return PolicyDecision.ALLOW
+            return decision
         except Exception as e:
             logger.warning(f"[ToolExecutor] Governance check failed: {e}")
             return PolicyDecision.DENY  # Fail closed

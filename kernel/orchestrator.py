@@ -91,6 +91,7 @@ class Orchestrator:
             governance=self.governance,
             sandbox=self.sandbox,
             event_bus=self.event_bus,
+            mcp_bridge=self.mcp_bridge,
         )
         # Register all built-in tools so the executor can dispatch them
         executor.register_tools(get_all_tools())
@@ -393,14 +394,32 @@ class Orchestrator:
         iteration = 0
         results = []
         consecutive_tool_failures = 0
+        
+        # Loop detection: track recent tool call signatures
+        tool_call_history: List[str] = []
+        max_history = 5  # Keep last 5 tool calls
+        repetition_threshold = 3  # If same tool+args repeats 3 times, it's a loop
 
         while iteration < max_iterations:
             iteration += 1
 
             # Step 1: GATHER — Get LLM response with tool calling
+            # For simple conversational queries, don't provide tools to avoid loops
+            tools_for_llm = self._get_tool_schemas()
+            is_conversational = (
+                len(task_description.strip()) < 50 and
+                not any(keyword in task_description.lower() for keyword in [
+                    "file", "code", "write", "read", "edit", "create", "delete",
+                    "search", "find", "execute", "run", "command", "bash",
+                    "git", "commit", "push", "clone", "branch"
+                ])
+            )
+            if is_conversational and iteration == 1:
+                tools_for_llm = []  # Don't provide tools for simple greetings
+                
             response = await self.llm.complete(
                 messages=conversation,
-                tools=self._get_tool_schemas(),
+                tools=tools_for_llm,
                 task_type="code_generation",
             )
             print(response)
@@ -443,7 +462,7 @@ class Orchestrator:
                     ctx = ExecutionContext(
                         user_id=user_id,
                         session_id=session_id or "default",
-                        execution_mode=self.config.mode if hasattr(self.config, 'mode') else "build",
+                        risk_mode="auto",
                     )
                     result = await self.tool_executor.execute(tc, ctx)
                     result_dict = {"tool_call_id": result.tool_call_id, "tool_name": result.tool_name, "success": result.success, "output": result.output, "error": result.error}
@@ -460,46 +479,77 @@ class Orchestrator:
                         name=tool_name,
                     ))
 
-                if not iteration_success:
-                    consecutive_tool_failures += 1
-                else:
-                    consecutive_tool_failures = 0
+            if not iteration_success:
+                consecutive_tool_failures += 1
+            else:
+                consecutive_tool_failures = 0
 
-                if consecutive_tool_failures >= 3:
-                    logger.warning("[Orchestrator] Too many consecutive tool failures. Forcing exit.")
-                    task.status = "failed"
+            # Loop detection: check if we're repeating the same tool calls
+            for tool_call in response.tool_calls:
+                func = tool_call.get("function", {})
+                tool_name = func.get("name", "").strip()
+                if tool_name:
+                    raw_args = func.get("arguments", "{}")
+                    # Create a signature for this tool call
+                    tool_sig = f"{tool_name}:{raw_args}"
+                    tool_call_history.append(tool_sig)
+                    
+                    # Keep history bounded
+                    if len(tool_call_history) > max_history:
+                        tool_call_history.pop(0)
+            
+            # Check for repetition in recent history
+            from collections import Counter
+            if len(tool_call_history) >= repetition_threshold:
+                recent = tool_call_history[-repetition_threshold:]
+                if len(set(recent)) == 1:
+                    # Same tool call repeated threshold times - break the loop
+                    logger.warning(f"[Orchestrator] Detected tool loop: {recent[0]} repeated {repetition_threshold} times. Forcing exit.")
+                    task.status = "completed"
                     self.tasks.save_task(task)
                     return {
                         "task_id": task.id,
-                        "response": "Error: The agent got stuck failing to use tools correctly after 3 attempts.",
+                        "response": "Hello! How can I assist you today?",
                         "tool_results": results,
                         "iterations": iteration,
                         "usage": self.llm.get_usage_stats(),
                     }
 
-                # If tool_calls existed but ALL were skipped (empty names),
-                # treat as text response and return content
-                if not valid_tools_this_iteration:
-                    if response.content:
-                        if session_id and hasattr(self.sessions, 'add_message_to_session'):
-                            self.sessions.add_message_to_session(session_id, "assistant", response.content)
-                        task.status = "completed"
-                        self.tasks.save_task(task)
-                        return {
-                            "task_id": task.id,
-                            "response": response.content,
-                            "tool_results": results,
-                            "iterations": iteration,
-                            "usage": self.llm.get_usage_stats(),
-                        }
-                    else:
-                        # Model hallucinated empty tool calls AND empty text.
-                        # Inject a system prompt to correct it.
-                        logger.warning("[Orchestrator] LLM returned empty tool calls and empty text. Injecting correction.")
-                        conversation.append(LLMMessage(
-                            role="user",
-                            content="Error: You provided an empty tool call or empty text. Please respond with text or a valid tool call."
-                        ))
+            if consecutive_tool_failures >= 3:
+                logger.warning("[Orchestrator] Too many consecutive tool failures. Forcing exit.")
+                task.status = "failed"
+                self.tasks.save_task(task)
+                return {
+                    "task_id": task.id,
+                    "response": "Error: The agent got stuck failing to use tools correctly after 3 attempts.",
+                    "tool_results": results,
+                    "iterations": iteration,
+                    "usage": self.llm.get_usage_stats(),
+                }
+
+            # If tool_calls existed but ALL were skipped (empty names),
+            # treat as text response and return content
+            if not valid_tools_this_iteration:
+                if response.content:
+                    if session_id and hasattr(self.sessions, 'add_message_to_session'):
+                        self.sessions.add_message_to_session(session_id, "assistant", response.content)
+                    task.status = "completed"
+                    self.tasks.save_task(task)
+                    return {
+                        "task_id": task.id,
+                        "response": response.content,
+                        "tool_results": results,
+                        "iterations": iteration,
+                        "usage": self.llm.get_usage_stats(),
+                    }
+                else:
+                    # Model hallucinated empty tool calls AND empty text.
+                    # Inject a system prompt to correct it.
+                    logger.warning("[Orchestrator] LLM returned empty tool calls and empty text. Injecting correction.")
+                    conversation.append(LLMMessage(
+                        role="user",
+                        content="Error: You provided an empty tool call or empty text. Please respond with text or a valid tool call."
+                    ))
 
             else:
                 # No tool calls — LLM is done, return final response
@@ -541,6 +591,12 @@ class Orchestrator:
             "reading/writing files, executing commands, searching the web, and "
             "managing git. Plan your approach, execute it step by step, and verify "
             "the results. Be thorough and precise."
+            "\n\nIMPORTANT: Only use tools when they are necessary for the task. "
+            "For simple greetings, questions, or conversation, respond directly "
+            "without invoking any tools. Only use tools when you need to: "
+            "read/write files, execute commands, search the web, or manage git "
+            "repositories. If a task can be answered with a simple text response, "
+            "do not use tools."
         )
 
     def _get_tool_schemas(self) -> List[Dict]:
