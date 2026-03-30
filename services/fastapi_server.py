@@ -47,6 +47,10 @@ def _default_model_catalog():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle event handler for the FastAPI app."""
+    # Log that the UI is ready only once during startup
+    ui_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "ui", "web"))
+    if os.path.exists(ui_dir):
+        print(f"UI Static Hub: {os.path.join(ui_dir, 'index.html')} is READY")
     from project_kernel_runtime.kernel.orchestrator import init_orchestrator
     global orchestrator
     orchestrator = await init_orchestrator()
@@ -324,7 +328,7 @@ async def set_runtime_yaml(request: Dict[str, Any]):
 ui_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "ui", "web"))
 if os.path.exists(ui_dir):
     app.mount("/ui", StaticFiles(directory=ui_dir), name="ui")
-    print(f"UI Static Hub: {os.path.join(ui_dir, 'index.html')} is READY")
+    # Removed redundant print
 else:
     print(f"ERROR: UI dir missing at {ui_dir}")
 

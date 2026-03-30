@@ -403,6 +403,7 @@ class Orchestrator:
                 tools=self._get_tool_schemas(),
                 task_type="code_generation",
             )
+            print(response)
 
             # Step 2: PLAN — Check if LLM wants to call tools
             if response.tool_calls:

@@ -1,6 +1,6 @@
 version: 2.0.0
 api_version: 2026-03
-mode: development
+mode: production
 modes:
 - http
 - cli
@@ -15,17 +15,17 @@ governance:
     plan:
       read_only: true
       write: false
-      execute: false
-      network: false
+      execute: true
+      network: true
     review:
       read_only: true
       write: false
-      execute: false
-      network: false
+      execute: true
+      network: true
     research:
       read_only: true
       write: false
-      execute: false
+      execute: true
       network: true
     build:
       read_only: true
@@ -63,13 +63,13 @@ mcpServers:
     args:
     - -m
     - mcp_server_filesystem
-    disabled: false
-    auto_start: true
+    disabled: true
+    auto_start: false
   websearch-mcp:
     command: node
     args:
     - websearch-server.js
-    disabled: true
+    disabled: false
     auto_start: false
   filesystem-access:
     command: npx

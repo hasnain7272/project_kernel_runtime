@@ -143,7 +143,7 @@ class LLMProvider:
             model = f"ollama/{model}"
         
         print(f"[LLMProvider] complete() called — task_type={task_type}, resolved_model={model}")
-        
+        print(messages)
         start_time = time.time()
         
         try:
@@ -154,7 +154,7 @@ class LLMProvider:
                 max_tokens=max_tokens,
                 tools=tools,
             )
-            
+            print(response)
             response.latency_ms = (time.time() - start_time) * 1000
             self._track_usage(response)
             return response
@@ -223,6 +223,7 @@ class LLMProvider:
             content = messages[-1].content if messages else ""
             # Simple extract: first 500 chars
             summary = content[:500] + "..." if len(content) > 500 else content
+            print(f"[LLMProvider] litellm not installed. Fallback to basic summarization: {summary}")
             return LLMResponse(
                 content=summary,
                 model=model,
