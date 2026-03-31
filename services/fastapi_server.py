@@ -15,6 +15,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import sys
 import os
+from pathlib import Path
 
 # Add src to path so project_kernel_runtime is found even if run directly
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -28,6 +29,7 @@ if "OLLAMA_API_BASE" not in os.environ:
 # --- Core Dependencies ---
 from project_kernel_runtime.kernel.task_state_machine import TaskStatus
 from project_kernel_runtime.services.research_api import router as research_router
+from project_kernel_runtime.services.project_registry import build_project_registry, load_runtime_yaml, session_payload
 from project_kernel_runtime.memory.state_hub import state_hub
 
 # Global orchestrator instance
@@ -175,51 +177,29 @@ async def get_ui_schema():
 @app.get("/api/ui/bootstrap")
 async def get_ui_bootstrap():
     """Aggregate the main UI bootstrap state in one request."""
-    import yaml
-    from pathlib import Path
-
-    config_path = Path(__file__).parent.parent / "runtime.yaml"
-    config = {}
-    if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
+    config = load_runtime_yaml()
 
     sessions = []
     models = _default_model_catalog()
     if orchestrator:
-        sessions = [
-            {
-                "id": session.session_id,
-                "session_id": session.session_id,
-                "user_id": session.user_id,
-                "workspace_path": session.workspace_path,
-                "mode": session.mode,
-                "skills": getattr(session, "skills", []),
-                "mcp_servers": getattr(session, "mcp_servers", []),
-                "folders": getattr(session, "folders", []),
-                "active": session.is_active,
-                "created_at": session.created_at.isoformat(),
-                "last_active": session.last_active.isoformat(),
-            }
-            for session in orchestrator.sessions.sessions.values()
-        ]
+        sessions = [session_payload(session) for session in orchestrator.sessions.sessions.values()]
         try:
             models = await get_available_models()
         except Exception:
             models = _default_model_catalog()
-
-    skills_cfg = config.get("skills", {})
+    project_registry = build_project_registry(orchestrator=orchestrator, config=config)
+    config_path = Path(__file__).parent.parent / "runtime.yaml"
     return {
         "sessions": sessions,
         "models": models,
         "active_model": getattr(getattr(orchestrator, "llm", None), "active_model", config.get("llm", {}).get("active_model", "")),
         "features": config.get("features", {}),
         "skills": {
-            "available_packs": skills_cfg.get("core", []) + skills_cfg.get("domain", []),
-            "core": skills_cfg.get("core", []),
-            "domain": skills_cfg.get("domain", []),
+            "available_packs": [item["name"] for item in project_registry["skills"] if item["enabled"]],
+            "catalog": project_registry["skills"],
         },
-        "mcp_registry": config.get("mcpServers", {}),
+        "mcp_registry": {item["name"]: item for item in project_registry["mcp_servers"]},
+        "project_registry": project_registry,
         "runtime_yaml_available": config_path.exists(),
     }
 
@@ -461,15 +441,7 @@ async def list_sessions():
 
     sessions = []
     for session in orchestrator.sessions.sessions.values():
-        sessions.append({
-            "id": session.session_id,
-            "user_id": session.user_id,
-            "workspace_path": session.workspace_path,
-            "mode": session.mode,
-            "active": session.is_active,
-            "created_at": session.created_at.isoformat(),
-            "last_active": session.last_active.isoformat(),
-        })
+        sessions.append(session_payload(session))
     return {"sessions": sessions}
 
 @app.post("/api/sessions")
@@ -486,13 +458,15 @@ async def create_session(request: Dict):
         raise HTTPException(status_code=400, detail="user_id and workspace_path required")
 
     session = await orchestrator.start_session(user_id, workspace_path, mode)
-    return {
-        "id": session.session_id,
-        "user_id": session.user_id,
-        "workspace_path": session.workspace_path,
-        "mode": session.mode,
-        "status": "created",
-    }
+    project_registry = build_project_registry(orchestrator=orchestrator)
+    session.user_role = project_registry["governance_defaults"].get("default_role", "developer")
+    session.skills = [item["name"] for item in project_registry["skills"] if item["enabled"]]
+    session.mcp_servers = [item["name"] for item in project_registry["mcp_servers"] if not item["disabled"]]
+    session.folders = [workspace_path]
+    session.a2a_enabled = bool(project_registry["a2a"].get("enabled"))
+    session.a2a_peers = [peer["id"] for peer in project_registry["a2a"].get("peers", [])]
+    orchestrator.sessions.update_session(session.session_id, session)
+    return session_payload(session)
 
 # WebSocket connections
 

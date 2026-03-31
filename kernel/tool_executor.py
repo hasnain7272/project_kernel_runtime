@@ -74,11 +74,16 @@ class ExecutionContext:
     session_id: str = ""
     task_id: str = ""
     user_id: str = "system"
+    execution_mode: str = "build"
     user_role: str = "developer"
     risk_mode: str = "auto"  # auto, ask, bypass
     workspace_path: str = "."
     environment: Dict[str, str] = field(default_factory=dict)
     enabled_features: List[str] = field(default_factory=lambda: ["mcp", "skills", "llms", "a2a"])
+    enforce_skill_scope: bool = False
+    allowed_builtin_tools: List[str] = field(default_factory=list)
+    allowed_mcp_servers: List[str] = field(default_factory=list)
+    allowed_folders: List[str] = field(default_factory=list)
 
 
 # ============================================================================
@@ -244,6 +249,13 @@ class ToolExecutor:
                 if "mcp" not in context.enabled_features:
                     logger.warning(f"[Governance] DENIED: MCP tools are disabled for this session.")
                     return PolicyDecision.DENY
+                server_name = tool_call.name.split("__", 1)[0]
+                if context.allowed_mcp_servers and server_name not in context.allowed_mcp_servers:
+                    logger.warning(f"[Governance] DENIED: MCP server '{server_name}' is not bound to this session.")
+                    return PolicyDecision.DENY
+            elif context.enforce_skill_scope and tool_call.name not in context.allowed_builtin_tools:
+                logger.warning(f"[Governance] DENIED: tool '{tool_call.name}' is outside the session skill scope.")
+                return PolicyDecision.DENY
 
             tool = self._tools.get(tool_call.name)
             mutability = getattr(tool, 'mutability', ToolMutability.READ_ONLY) if tool else ToolMutability.READ_ONLY

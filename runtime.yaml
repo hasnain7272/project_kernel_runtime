@@ -63,7 +63,7 @@ mcpServers:
     args:
     - -m
     - mcp_server_filesystem
-    disabled: true
+    disabled: false
     auto_start: false
   websearch-mcp:
     command: node
@@ -148,8 +148,11 @@ skills:
   - terminal_execution
   - git_operations
   - mcp_client
+  - lsp_integration
   domain: []
   auto_discover: true
+  coding:
+  - debugging
 features:
   gtm_swarm: true
   vision_swarm: false

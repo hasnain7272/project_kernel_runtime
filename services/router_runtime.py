@@ -6,6 +6,11 @@ from fastapi import APIRouter, HTTPException
 from fastapi import APIRouter, HTTPException, Body
 import yaml
 
+from project_kernel_runtime.services.project_registry import (
+    build_project_registry,
+    build_skill_catalog,
+    ensure_project_registry,
+)
 from project_kernel_runtime.services.runtime_control import get_control_plane
 
 router = APIRouter()
@@ -59,6 +64,54 @@ def _load_runtime_yaml() -> Dict[str, Any]:
 def _save_runtime_yaml(data: Dict[str, Any]) -> None:
     with open(_runtime_yaml_path(), "w", encoding="utf-8") as handle:
         yaml.dump(data, handle, default_flow_style=False, sort_keys=False)
+
+
+def _resolve_workspace_path(path: Optional[str]) -> Path:
+    root = Path(__file__).resolve().parent.parent
+    candidate = Path(path) if path else root
+    if not candidate.is_absolute():
+        candidate = (root / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+@router.get("/api/project/registry")
+async def get_project_registry():
+    orchestrator = _get_orchestrator()
+    config = _load_runtime_yaml()
+    return build_project_registry(orchestrator=orchestrator, config=config)
+
+
+@router.get("/api/project/folders")
+async def list_project_folders():
+    config = _load_runtime_yaml()
+    registry = ensure_project_registry(config)
+    return {"folders": registry.get("folders", [])}
+
+
+@router.post("/api/project/folders")
+async def add_project_folder(payload: Dict[str, Any]):
+    path = (payload.get("path") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path required")
+    config = _load_runtime_yaml()
+    registry = ensure_project_registry(config)
+    folders = registry.setdefault("folders", [])
+    if path not in folders:
+        folders.append(path)
+    registry["folders"] = folders
+    _save_runtime_yaml(config)
+    return {"folders": folders}
+
+
+@router.delete("/api/project/folders")
+async def remove_project_folder(path: str):
+    config = _load_runtime_yaml()
+    registry = ensure_project_registry(config)
+    registry["folders"] = [folder for folder in registry.get("folders", []) if folder != path]
+    _save_runtime_yaml(config)
+    return {"folders": registry["folders"]}
 
 
 def _provider_to_dict(provider: Any) -> Dict[str, Any]:
@@ -306,6 +359,50 @@ async def governance_audit(limit: int = 100):
     }
 
 
+@router.get("/api/governance/approvals")
+async def governance_approvals():
+    orchestrator = _get_orchestrator()
+    pending = getattr(orchestrator.governance, "_pending_approvals", {})
+    approvals = []
+    for approval_id, item in pending.items():
+        approvals.append({"approval_id": approval_id, **item})
+    approvals.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return {"approvals": approvals}
+
+
+@router.post("/api/governance/approvals/{approval_id}")
+async def resolve_governance_approval(approval_id: str, payload: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    approved = bool(payload.get("approved", False))
+    reviewer_id = payload.get("reviewer_id", "web-ui")
+    success = await orchestrator.governance.resolve_approval(approval_id, approved, reviewer_id=reviewer_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return {"approval_id": approval_id, "approved": approved}
+
+
+@router.get("/api/events")
+async def list_event_stream(limit: int = 100, session_id: Optional[str] = None, task_id: Optional[str] = None):
+    orchestrator = _get_orchestrator()
+    events = orchestrator.event_bus.get_event_log(last_n=limit)
+    payload = []
+    for event in events:
+        if session_id and event.session_id != session_id:
+            continue
+        if task_id and event.task_id != task_id:
+            continue
+        payload.append({
+            "id": event.id,
+            "type": event.type,
+            "source": event.source,
+            "timestamp": event.timestamp.isoformat(),
+            "session_id": event.session_id,
+            "task_id": event.task_id,
+            "payload": event.payload,
+        })
+    return {"events": payload}
+
+
 @router.post("/api/mcp/registry")
 async def register_mcp_server(payload: Dict[str, Any]):
     """Add a new MCP server configuration dynamically to runtime.yaml."""
@@ -339,14 +436,16 @@ async def mcp_full_registry():
         pass
     servers = []
     for name, cfg in registered.items():
+        live = bridge_status.get("servers", {}).get(name, {})
         servers.append({
             "name": name,
             "command": cfg.get("command", ""),
             "args": cfg.get("args", []),
             "disabled": cfg.get("disabled", False),
             "auto_start": cfg.get("auto_start", False),
-            "status": "connected" if name in bridge_status.get("connected", []) else "stopped",
+            "status": live.get("status", "stopped"),
             "transport": cfg.get("transport", "stdio"),
+            "tool_count": live.get("tool_count", 0),
         })
     external_tools = []
     try:
@@ -373,6 +472,34 @@ async def toggle_mcp_server(name: str, payload: Dict[str, Any]):
     return {"name": name, "disabled": servers[name]["disabled"]}
 
 
+@router.post("/api/mcp/servers/{name}/start")
+async def start_mcp_server(name: str):
+    orchestrator = _get_orchestrator()
+    config = _load_runtime_yaml()
+    server_cfg = (config.get("mcpServers", {}) or {}).get(name)
+    if not server_cfg:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not in registry")
+    if server_cfg.get("disabled"):
+        raise HTTPException(status_code=400, detail=f"Server '{name}' is disabled")
+
+    connected = await orchestrator.mcp_bridge.connect(name, server_cfg)
+    status = orchestrator.mcp_bridge.get_status()
+    return {
+        "started": bool(connected),
+        "server": name,
+        "status": status.get("servers", {}).get(name, {"status": "error" if not connected else "connected"}),
+    }
+
+
+@router.post("/api/mcp/servers/{name}/stop")
+async def stop_mcp_server(name: str):
+    orchestrator = _get_orchestrator()
+    disconnected = await orchestrator.mcp_bridge.disconnect(name)
+    if not disconnected:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' is not connected")
+    return {"stopped": True, "server": name}
+
+
 @router.get("/api/a2a/topology")
 async def a2a_topology():
     """Return graph nodes/edges for A2A mesh visualization."""
@@ -396,7 +523,7 @@ async def a2a_topology():
     edges = []
     for i, peer in enumerate(peers):
         peer_data = peer.to_dict() if hasattr(peer, "to_dict") else {"id": f"peer_{i}", "name": f"Peer {i}"}
-        pid = peer_data.get("id", f"peer_{i}")
+        pid = peer_data.get("peer_id", peer_data.get("id", f"peer_{i}"))
         nodes.append({
             "id": pid,
             "label": peer_data.get("name", pid),
@@ -411,6 +538,41 @@ async def a2a_topology():
         "mesh": mesh,
         "protocol_version": a2a_cfg.get("version", "0.3"),
     }
+
+
+@router.post("/api/a2a/delegate")
+async def delegate_a2a_task(payload: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    description = (payload.get("description") or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description required")
+
+    peers = []
+    try:
+        peers = orchestrator.mesh_p2p.discover_peers()
+    except Exception:
+        peers = []
+
+    target_peer = payload.get("target_peer")
+    if not target_peer and peers:
+        first_peer = peers[0]
+        target_peer = getattr(first_peer, "peer_id", None) or getattr(first_peer, "id", None)
+    if not target_peer:
+        target_peer = "mesh-fallback"
+
+    job = await get_control_plane().create_job(
+        orchestrator,
+        "a2a_delegate",
+        {
+            "target_peer": target_peer,
+            "description": description,
+            "session_id": payload.get("session_id"),
+            "workspace_path": payload.get("workspace_path"),
+            "user_id": payload.get("user_id", "web-ui"),
+            "max_iterations": int(payload.get("max_iterations", 6)),
+        },
+    )
+    return {"job": job, "target_peer": target_peer}
 
 
 @router.post("/api/auto-tune")
@@ -511,10 +673,19 @@ async def apply_auto_tune(payload: Dict[str, Any]):
 async def workspace_file_tree(path: Optional[str] = None, depth: int = 3):
     """Return a file/folder tree for IDE-style explorer in the UI."""
 
-    # Default to the project root
-    root = Path(path) if path else Path(__file__).resolve().parent.parent
+    root = _resolve_workspace_path(path)
     if not root.exists():
-        raise HTTPException(status_code=404, detail="Path not found")
+        return {
+            "tree": {
+                "name": root.name or str(root),
+                "path": str(root),
+                "type": "directory",
+                "missing": True,
+                "children": [],
+            },
+            "root": str(root),
+            "exists": False,
+        }
 
     IGNORE = {".git", "__pycache__", "node_modules", ".venv", "venv", ".eggs", "data", ".tox"}
 
@@ -539,13 +710,13 @@ async def workspace_file_tree(path: Optional[str] = None, depth: int = 3):
         return node
 
     tree = walk(root, 0)
-    return {"tree": tree, "root": str(root)}
+    return {"tree": tree, "root": str(root), "exists": True}
 
 
 @router.get("/api/workspace/file")
 async def read_workspace_file(path: str = ""):
     """Read a file's content for the IDE viewer."""
-    fp = Path(path)
+    fp = _resolve_workspace_path(path)
     if not fp.exists() or not fp.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -569,14 +740,12 @@ async def read_workspace_file(path: str = ""):
 async def get_skills_registry():
     """Return the full skills registry from runtime.yaml."""
     config = _load_runtime_yaml()
-    skills = config.get("skills", {})
-    core = skills.get("core", [])
-    domain = skills.get("domain", [])
+    catalog = build_skill_catalog(config)
     return {
-        "available_packs": core + domain,
-        "core": [{"name": s, "enabled": True} for s in core],
-        "domain": [{"name": s, "enabled": True} for s in domain],
-        "auto_discover": skills.get("auto_discover", False),
+        "available_packs": [item["name"] for item in catalog if item["enabled"]],
+        "core": [item for item in catalog if item["pack"] == "core"],
+        "domain": [item for item in catalog if item["pack"] != "core"],
+        "auto_discover": config.get("skills", {}).get("auto_discover", False),
     }
 
 
@@ -586,16 +755,19 @@ async def toggle_skill(name: str, payload: Dict[str, Any]):
     enabled = payload.get("enabled", True)
     config = _load_runtime_yaml()
     skills = config.setdefault("skills", {})
+    target_section = payload.get("pack", "core")
 
-    # Check core and domain lists
     for section in ("core", "domain"):
         items = skills.get(section, [])
-        if enabled and name not in items:
-            items.append(name)
-            skills[section] = items
-        elif not enabled and name in items:
+        if not enabled and name in items:
             items.remove(name)
             skills[section] = items
+
+    if enabled:
+        items = skills.get(target_section, [])
+        if name not in items:
+            items.append(name)
+            skills[target_section] = items
 
     _save_runtime_yaml(config)
     return {"name": name, "enabled": enabled}

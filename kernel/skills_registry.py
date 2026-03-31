@@ -41,7 +41,7 @@ CORE_SKILLS = [
     Skill(
         name="terminal_execution",
         description="Execute shell commands with error capture",
-        tools=["shell_exec", "run_test", "run_lint"],
+        tools=["bash_execute", "run_test", "run_lint"],
         level=SkillLevel.EXECUTE,
         pack="core"
     ),

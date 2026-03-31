@@ -380,8 +380,9 @@ class Orchestrator:
             session_id=session_id,
         )
 
+        session = self.sessions.get_session(session_id) if session_id else None
         conversation = [
-            LLMMessage(role="system", content=self._build_system_prompt()),
+            LLMMessage(role="system", content=self._build_system_prompt(session)),
             LLMMessage(role="user", content=task_description),
         ]
         
@@ -405,7 +406,7 @@ class Orchestrator:
 
             # Step 1: GATHER — Get LLM response with tool calling
             # For simple conversational queries, don't provide tools to avoid loops
-            tools_for_llm = self._get_tool_schemas()
+            tools_for_llm = self._get_tool_schemas(session)
             is_conversational = (
                 len(task_description.strip()) < 50 and
                 not any(keyword in task_description.lower() for keyword in [
@@ -422,7 +423,23 @@ class Orchestrator:
                 tools=tools_for_llm,
                 task_type="code_generation",
             )
-            print(response)
+            if not response.tool_calls:
+                if session_id and response.content and hasattr(self.sessions, 'add_message_to_session'):
+                    self.sessions.add_message_to_session(session_id, "assistant", response.content)
+                task.status = "completed"
+                self.tasks.save_task(task)
+                await self.event_bus.emit_and_publish("task.completed", {
+                    "task_id": task.id,
+                    "iterations": iteration,
+                    "tool_calls": len(results),
+                }, source="orchestrator")
+                return {
+                    "task_id": task.id,
+                    "response": response.content,
+                    "tool_results": results,
+                    "iterations": iteration,
+                    "usage": self.llm.get_usage_stats(),
+                }
 
             # Step 2: PLAN — Check if LLM wants to call tools
             if response.tool_calls:
@@ -459,10 +476,24 @@ class Orchestrator:
                     # Step 3: ACT — Execute tool via pipeline
                     from .tool_executor import ToolCall as TC, ExecutionContext
                     tc = TC(name=tool_name, arguments=args)
+                    allowed_builtin_tools = self._session_allowed_builtin_tools(session)
+                    enabled_features = ["skills", "llms"]
+                    if session and getattr(session, "mcp_servers", []):
+                        enabled_features.append("mcp")
+                    if session and getattr(session, "a2a_enabled", False):
+                        enabled_features.append("a2a")
                     ctx = ExecutionContext(
                         user_id=user_id,
                         session_id=session_id or "default",
-                        risk_mode="auto",
+                        execution_mode=self.config.mode if hasattr(self.config, 'mode') else "build",
+                        user_role=getattr(session, "user_role", getattr(self.config.governance, "default_role", "developer")) if session else getattr(self.config.governance, "default_role", "developer"),
+                        risk_mode=getattr(session, "risk_mode", "auto") if session else "auto",
+                        workspace_path=session.workspace_path if session else ".",
+                        enabled_features=enabled_features,
+                        enforce_skill_scope=session is not None,
+                        allowed_builtin_tools=allowed_builtin_tools,
+                        allowed_mcp_servers=getattr(session, "mcp_servers", []) if session else [],
+                        allowed_folders=getattr(session, "folders", []) if session else [],
                     )
                     result = await self.tool_executor.execute(tc, ctx)
                     result_dict = {"tool_call_id": result.tool_call_id, "tool_name": result.tool_name, "success": result.success, "output": result.output, "error": result.error}
@@ -551,27 +582,6 @@ class Orchestrator:
                         content="Error: You provided an empty tool call or empty text. Please respond with text or a valid tool call."
                     ))
 
-            else:
-                # No tool calls — LLM is done, return final response
-                if session_id and response.content and hasattr(self.sessions, 'add_message_to_session'):
-                    self.sessions.add_message_to_session(session_id, "assistant", response.content)
-                task.status = "completed"
-                self.tasks.save_task(task)
-
-                await self.event_bus.emit_and_publish("task.completed", {
-                    "task_id": task.id,
-                    "iterations": iteration,
-                    "tool_calls": len(results),
-                }, source="orchestrator")
-
-                return {
-                    "task_id": task.id,
-                    "response": response.content,
-                    "tool_results": results,
-                    "iterations": iteration,
-                    "usage": self.llm.get_usage_stats(),
-                }
-
             # Step 4: VERIFY — Check for stop conditions
             if iteration >= max_iterations:
                 break
@@ -584,8 +594,18 @@ class Orchestrator:
             "iterations": iteration,
         }
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, session=None) -> str:
         """Build system prompt with project context."""
+        constraints = ""
+        if session:
+            constraints = (
+                f"\n\nSession governance:"
+                f"\n- role: {getattr(session, 'user_role', 'developer')}"
+                f"\n- risk mode: {getattr(session, 'risk_mode', 'auto')}"
+                f"\n- allowed skills: {', '.join(getattr(session, 'skills', [])) or 'none'}"
+                f"\n- bound MCP servers: {', '.join(getattr(session, 'mcp_servers', [])) or 'none'}"
+                f"\n- allowed folders: {', '.join(getattr(session, 'folders', [])) or session.workspace_path}"
+            )
         return (
             "You are an autonomous coding agent. You have access to tools for "
             "reading/writing files, executing commands, searching the web, and "
@@ -597,12 +617,27 @@ class Orchestrator:
             "read/write files, execute commands, search the web, or manage git "
             "repositories. If a task can be answered with a simple text response, "
             "do not use tools."
+            + constraints
         )
 
-    def _get_tool_schemas(self) -> List[Dict]:
+    def _session_allowed_builtin_tools(self, session) -> List[str]:
+        if not session or not getattr(session, "skills", None):
+            return []
+        tools: List[str] = []
+        for skill_name in session.skills:
+            try:
+                tools.extend(self.skills.get_tools_for_skill(skill_name))
+            except Exception:
+                continue
+        return list(dict.fromkeys(tool for tool in tools if tool))
+
+    def _get_tool_schemas(self, session=None) -> List[Dict]:
         """Get tool schemas for LLM function calling, including external MCP tools."""
         from .universal_tools import get_all_tools
         tools = get_all_tools()
+        allowed_builtin = set(self._session_allowed_builtin_tools(session))
+        if session is not None:
+            tools = [tool for tool in tools if tool.name in allowed_builtin]
         schemas = [
             {
                 "type": "function",
@@ -618,6 +653,12 @@ class Orchestrator:
         # Inject external MCP tools from the bridge
         try:
             external_tools = self.mcp_bridge.get_all_external_tools()
+            if session and getattr(session, "mcp_servers", None):
+                allowed_mcp = set(session.mcp_servers)
+                external_tools = [
+                    tool for tool in external_tools
+                    if tool.get("_mcp_server") in allowed_mcp
+                ]
             schemas.extend(external_tools)
             if external_tools:
                 logger.info(f"[Orchestrator] Injected {len(external_tools)} external MCP tools into LLM context")
@@ -772,11 +813,24 @@ class Orchestrator:
 
         tc = TC(name=tool_name, arguments=arguments, session_id=session_id, user_id=user_id)
         session = self.sessions.get_session(session_id) if session_id else None
+        allowed_builtin_tools = self._session_allowed_builtin_tools(session)
+        enabled_features = ["skills", "llms"]
+        if session and getattr(session, "mcp_servers", []):
+            enabled_features.append("mcp")
+        if session and getattr(session, "a2a_enabled", False):
+            enabled_features.append("a2a")
         ctx = ExecutionContext(
             user_id=user_id,
             session_id=session_id or "default",
             execution_mode=self.config.mode if hasattr(self.config, 'mode') else "build",
+            user_role=getattr(session, "user_role", getattr(self.config.governance, "default_role", "developer")) if session else getattr(self.config.governance, "default_role", "developer"),
+            risk_mode=getattr(session, "risk_mode", "auto") if session else "auto",
             workspace_path=session.workspace_path if session else ".",
+            enabled_features=enabled_features,
+            enforce_skill_scope=session is not None,
+            allowed_builtin_tools=allowed_builtin_tools,
+            allowed_mcp_servers=getattr(session, "mcp_servers", []) if session else [],
+            allowed_folders=getattr(session, "folders", []) if session else [],
         )
 
         result = await self.tool_executor.execute(tc, ctx)

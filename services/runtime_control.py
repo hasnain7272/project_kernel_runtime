@@ -333,6 +333,51 @@ class RuntimeControlPlane:
                 "duration_ms": result.duration_ms,
             }
 
+        if kind == "a2a_delegate":
+            session_id = payload.get("session_id") or await self._ensure_session(
+                orchestrator,
+                payload.get("user_id", "api_user"),
+                payload.get("workspace_path"),
+            )
+            target_peer = payload.get("target_peer", "mesh-fallback")
+            description = payload.get("description", "").strip()
+            if not description:
+                raise ValueError("description is required")
+
+            mesh_peers = []
+            try:
+                mesh_peers = [
+                    peer.to_dict() if hasattr(peer, "to_dict") else dict(peer)
+                    for peer in orchestrator.mesh_p2p.discover_peers()
+                ]
+            except Exception:
+                mesh_peers = []
+
+            await orchestrator.event_bus.emit_and_publish(
+                "a2a.task.delegated",
+                {
+                    "target_peer": target_peer,
+                    "description": description,
+                    "peer_count": len(mesh_peers),
+                },
+                source="runtime_control",
+                session_id=session_id,
+            )
+
+            result = await orchestrator.execute_agentic_loop(
+                description,
+                user_id=payload.get("user_id", "api_user"),
+                session_id=session_id,
+                max_iterations=int(payload.get("max_iterations", 6)),
+            )
+            return {
+                "delegated": True,
+                "target_peer": target_peer,
+                "execution_mode": "local_mesh_fallback",
+                "mesh_peers": mesh_peers,
+                "result": result,
+            }
+
         if kind == "research_summary":
             session = await orchestrator.start_research_session(
                 payload.get("user_id", "api_user"),

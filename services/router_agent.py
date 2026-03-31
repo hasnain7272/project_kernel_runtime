@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from project_kernel_runtime.kernel.credits_engine import credits_engine
 from project_kernel_runtime.kernel.task_state_machine import TaskStatus, TaskStep, TaskType
 from project_kernel_runtime.memory.state_hub import state_hub
+from project_kernel_runtime.services.project_registry import build_project_registry, session_payload
 
 router = APIRouter()
 
@@ -26,22 +27,7 @@ def _get_orchestrator():
 
 
 def _session_payload(session) -> Dict[str, Any]:
-    return {
-        "id": session.session_id,
-        "session_id": session.session_id,
-        "user_id": session.user_id,
-        "workspace_path": session.workspace_path,
-        "mode": session.mode,
-        "risk_mode": getattr(session, "risk_mode", "auto"),
-        "skills": getattr(session, "skills", []),
-        "mcp_servers": getattr(session, "mcp_servers", []),
-        "folders": getattr(session, "folders", []),
-        "active": session.is_active,
-        "created_at": session.created_at.isoformat(),
-        "last_active": session.last_active.isoformat(),
-        "recent_files": session.get_recent_files(),
-        "recent_tasks": session.get_recent_tasks(),
-    }
+    return session_payload(session)
 
 
 def _task_payload(task) -> Dict[str, Any]:
@@ -70,12 +56,14 @@ def _task_payload(task) -> Dict[str, Any]:
 
 
 def _tool_result_payload(result) -> Dict[str, Any]:
+    output = jsonable_encoder(result.output)
+    embedded_error = output.get("error") if isinstance(output, dict) else None
     return {
         "tool_call_id": result.tool_call_id,
         "tool_name": result.tool_name,
-        "success": result.success,
-        "output": jsonable_encoder(result.output),
-        "error": result.error,
+        "success": bool(result.success and not embedded_error),
+        "output": output,
+        "error": result.error or embedded_error,
         "duration_ms": result.duration_ms,
         "metadata": jsonable_encoder(result.metadata),
     }
@@ -129,6 +117,14 @@ async def create_session(request: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="user_id and workspace_path required")
 
     session = await orchestrator.start_session(user_id, workspace_path, mode)
+    project_registry = build_project_registry(orchestrator=orchestrator)
+    session.user_role = project_registry["governance_defaults"].get("default_role", "developer")
+    session.skills = [item["name"] for item in project_registry["skills"] if item["enabled"]]
+    session.mcp_servers = [item["name"] for item in project_registry["mcp_servers"] if not item["disabled"]]
+    session.folders = [workspace_path]
+    session.a2a_enabled = bool(project_registry["a2a"].get("enabled"))
+    session.a2a_peers = [peer["id"] for peer in project_registry["a2a"].get("peers", [])]
+    orchestrator.sessions.update_session(session.session_id, session)
     return _session_payload(session)
 
 
@@ -185,6 +181,12 @@ async def patch_session(session_id: str, request: Dict[str, Any]):
         session.mcp_servers = list(dict.fromkeys(request.get("mcp_servers", [])))
     if "folders" in request:
         session.folders = list(dict.fromkeys(request.get("folders", [])))
+    if "user_role" in request and request["user_role"]:
+        session.user_role = request["user_role"]
+    if "a2a_enabled" in request:
+        session.a2a_enabled = bool(request["a2a_enabled"])
+    if "a2a_peers" in request:
+        session.a2a_peers = list(dict.fromkeys(request.get("a2a_peers", [])))
     if "mode" in request and request["mode"]:
         session.mode = request["mode"]
     if "risk_mode" in request and request["risk_mode"]:
@@ -192,6 +194,29 @@ async def patch_session(session_id: str, request: Dict[str, Any]):
 
     orchestrator.sessions.update_session(session_id, session)
     return _session_payload(session)
+
+
+@router.get("/sessions/{session_id}/governance")
+async def get_session_governance(session_id: str):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session_id,
+        "user_role": getattr(session, "user_role", "developer"),
+        "risk_mode": getattr(session, "risk_mode", "auto"),
+        "skills": getattr(session, "skills", []),
+        "mcp_servers": getattr(session, "mcp_servers", []),
+        "folders": getattr(session, "folders", []),
+        "a2a_enabled": getattr(session, "a2a_enabled", False),
+        "a2a_peers": getattr(session, "a2a_peers", []),
+    }
+
+
+@router.put("/sessions/{session_id}/governance")
+async def put_session_governance(session_id: str, request: Dict[str, Any]):
+    return await patch_session(session_id, request)
 
 
 @router.post("/sessions/{session_id}/mode")
@@ -420,6 +445,53 @@ async def search_memory(request: Dict[str, Any]):
         category=request.get("category"),
     )
     return {"results": [result.to_dict() for result in results]}
+
+
+@router.post("/sessions/{session_id}/terminal")
+async def run_session_terminal(session_id: str, request: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    command = request.get("command", "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command required")
+
+    result = await orchestrator.call_tool(
+        session.user_id,
+        "bash_execute",
+        {
+            "command": command,
+            "cwd": request.get("cwd") or (getattr(session, "folders", [])[:1] or [session.workspace_path])[0],
+            "timeout": int(request.get("timeout", 30)),
+        },
+        session_id=session_id,
+    )
+    orchestrator.sessions.add_command_to_session(session_id, command)
+    return {"result": _tool_result_payload(result)}
+
+
+@router.put("/sessions/{session_id}/workspace/file")
+async def save_session_file(session_id: str, request: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    path = request.get("path", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path required")
+
+    result = await orchestrator.call_tool(
+        session.user_id,
+        "write_file",
+        {"path": path, "content": request.get("content", "")},
+        session_id=session_id,
+    )
+    if result.success:
+        orchestrator.sessions.add_file_to_session(session_id, path)
+    return {"result": _tool_result_payload(result)}
 
 
 @router.post("/governance/rules")

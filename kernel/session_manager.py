@@ -37,6 +37,7 @@ class SessionContext:
         self.workspace_path = workspace_path
         self.mode = mode
         self.risk_mode = context.get("risk_mode", "auto") if context else "auto"
+        self.user_role = context.get("user_role", "developer") if context else "developer"
         self.context = context or {}
         self.created_at = datetime.now(timezone.utc)
         self.last_active = datetime.now(timezone.utc)
@@ -46,6 +47,8 @@ class SessionContext:
         self.skills: List[str] = getattr(self, "skills", [])
         self.mcp_servers: List[str] = getattr(self, "mcp_servers", [])
         self.folders: List[str] = getattr(self, "folders", [])
+        self.a2a_enabled = context.get("a2a_enabled", False) if context else False
+        self.a2a_peers: List[str] = getattr(self, "a2a_peers", [])
         self.conversation_messages: List[Dict] = []  # NEW: conversation memory
         self.is_active = True
 
@@ -97,6 +100,7 @@ class SessionContext:
             "workspace_path": self.workspace_path,
             "mode": self.mode,
             "risk_mode": getattr(self, "risk_mode", "auto"),
+            "user_role": getattr(self, "user_role", "developer"),
             "context": self.context,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat(),
@@ -107,7 +111,9 @@ class SessionContext:
             "conversation_messages": self.conversation_messages,
             "skills": getattr(self, "skills", []),
             "mcp_servers": getattr(self, "mcp_servers", []),
-            "folders": getattr(self, "folders", [])
+            "folders": getattr(self, "folders", []),
+            "a2a_enabled": getattr(self, "a2a_enabled", False),
+            "a2a_peers": getattr(self, "a2a_peers", []),
         }
 
     @classmethod
@@ -120,6 +126,7 @@ class SessionContext:
             context=data.get("context", {})
         )
         session.risk_mode = data.get("risk_mode", "auto")
+        session.user_role = data.get("user_role", "developer")
         if "created_at" in data:
             session.created_at = datetime.fromisoformat(data["created_at"])
         if "last_active" in data:
@@ -132,6 +139,8 @@ class SessionContext:
         session.skills = data.get("skills", [])
         session.mcp_servers = data.get("mcp_servers", [])
         session.folders = data.get("folders", [])
+        session.a2a_enabled = data.get("a2a_enabled", False)
+        session.a2a_peers = data.get("a2a_peers", [])
         return session
 
 

@@ -4,400 +4,690 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Project Kernel Runtime v2</title>
-
-  <!-- Tailwind + DaisyUI (Zero CSS constraint fulfilled) -->
+  <title>Project Kernel Runtime</title>
   <link href="https://cdn.jsdelivr.net/npm/daisyui@4.10.2/dist/full.min.css" rel="stylesheet" type="text/css" />
   <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- 3D Vanta Aesthetics -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.fog.min.js"></script>
-
-  <!-- UX/UI Tools -->
-    <script defer src="/ui/app.js?v=3"></script>
+  <script src="https://cdn.jsdelivr.net/npm/split.js/dist/split.min.js"></script>
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script defer src="/ui/app.js?v=7"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-
   <style>
+    [x-cloak] { display: none !important; }
     body {
       margin: 0;
-      padding: 0;
       overflow: hidden;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: "Segoe UI", sans-serif;
     }
-
     #vanta-canvas {
       position: fixed;
+      inset: 0;
       z-index: -1;
-      width: 100vw;
-      height: 100vh;
-      top: 0;
-      left: 0;
     }
-
     .glass-panel {
-      background: rgba(15, 23, 42, 0.45);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+      background: rgba(15, 23, 42, 0.5);
+      backdrop-filter: blur(14px);
       border: 1px solid rgba(255, 255, 255, 0.08);
-      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
     }
-
-    .sortable-ghost {
-      opacity: 0.4;
+    .split {
+      display: flex;
+      min-width: 0;
+      min-height: 0;
     }
-
-    .sortable-drag {
-      background: rgba(88, 166, 255, 0.2) !important;
-      cursor: grabbing !important;
+    .split-horizontal {
+      flex-direction: row;
     }
-
-    ::-webkit-scrollbar {
-      width: 4px;
-      height: 4px;
+    .gutter {
+      background: rgba(148, 163, 184, 0.15);
+      border-radius: 999px;
+      margin: 2px;
     }
-
-    ::-webkit-scrollbar-track {
-      background: transparent;
+    .gutter.gutter-horizontal {
+      cursor: col-resize;
+      width: 8px;
     }
-
-    ::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.2);
-      border-radius: 4px;
-    }
-
     .prose pre {
-      padding: 10px;
-      background: rgba(0, 0, 0, 0.5);
-      border-radius: 6px;
-      font-size: 11px;
+      background: rgba(2, 6, 23, 0.85);
+      border-radius: 0.75rem;
+      padding: 0.75rem;
+      font-size: 0.75rem;
     }
-
-    .prose p {
-      margin-bottom: 0.5rem;
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.18);
+      border-radius: 999px;
     }
   </style>
 </head>
 
 <body x-data="kernelUI()" x-init="initEngine()">
-
   <div id="vanta-canvas"></div>
 
-  <div class="flex h-screen w-screen p-4 gap-4 box-border">
-
-    <!-- LEFT PANE -->
-    <div class="w-2/3 flex flex-col gap-4">
-      <div class="glass-panel flex justify-between items-center rounded-2xl px-6 py-3 shrink-0">
-        <div class="flex items-center gap-3">
-          <i data-lucide="cpu" class="text-secondary w-6 h-6"></i>
-          <div>
-            <h1 class="text-sm font-bold tracking-widest text-base-content uppercase">Project Kernel <span
-                class="text-secondary opacity-80">v2.1</span></h1>
-            <p class="text-[10px] text-base-content/50"
-              x-text="'Active Session: ' + (activeSession?.user_id || 'None')"></p>
-          </div>
+  <main class="h-screen p-4 flex flex-col gap-4">
+    <section class="glass-panel rounded-3xl px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <div class="w-11 h-11 rounded-2xl bg-primary/20 flex items-center justify-center">
+          <i data-lucide="cpu" class="w-5 h-5 text-primary"></i>
         </div>
-        <div class="flex gap-2">
-          <button class="btn btn-sm btn-ghost btn-circle" @click="fetchState()"><i data-lucide="refresh-cw"
-              class="w-4 h-4"></i></button>
-          <button class="btn btn-sm btn-primary rounded-full px-6" @click="createSession()">+ New Session</button>
+        <div>
+          <div class="text-xs uppercase tracking-[0.35em] text-base-content/60">Project Kernel Runtime</div>
+          <div class="text-lg font-semibold">Agentic OS Control Surface</div>
+          <div class="text-xs text-base-content/50" x-text="activeSession ? `Session ${activeSession.user_id} active` : 'No session selected'"></div>
         </div>
       </div>
+      <div class="flex items-center gap-2">
+        <span class="badge badge-outline">Skills <span x-text="project.skills.length"></span></span>
+        <span class="badge badge-outline">MCP <span x-text="project.mcp_servers.length"></span></span>
+        <span class="badge badge-outline">Folders <span x-text="project.folders.length"></span></span>
+        <button class="btn btn-sm btn-ghost btn-circle" @click="refreshAll()">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+        </button>
+        <button class="btn btn-sm btn-primary rounded-full px-5" @click="createSession()">New Session</button>
+      </div>
+    </section>
 
-      <!-- Center Chat Stream -->
-      <div class="glass-panel flex-1 rounded-2xl flex flex-col overflow-hidden relative">
-        <div class="flex-1 overflow-y-auto p-6 space-y-4" id="chatArea">
-          <template x-for="(msg, i) in chatLog" :key="i">
-            <div class="chat" :class="msg.role === 'user' ? 'chat-end' : 'chat-start'">
-              <div class="chat-header text-[10px] opacity-50 mb-1"
-                x-text="msg.role === 'user' ? 'Operator' : (msg.role === 'tool' ? 'System Bridge' : 'Kernel Agent')">
-              </div>
-              <div class="chat-bubble text-sm prose prose-sm prose-invert shadow-xl"
-                :class="msg.role === 'user' ? 'bg-primary text-primary-content' : (msg.role === 'tool' ? 'bg-slate-800 text-gray-300 font-mono text-[10px]' : 'glass-panel text-base-content')"
-                x-html="msg.role === 'tool' ? ('<i>Action completed.</i><br>'+marked.parse(msg.content)) : marked.parse(msg.content)">
-              </div>
+    <section id="workbench-shell" class="split split-horizontal gap-0 flex-1 min-h-0">
+      <div id="workbench-main" class="flex flex-col gap-4 min-h-0 pr-2">
+        <div id="editor-shell" class="split split-horizontal h-80" x-cloak>
+          <div id="pane-explorer" class="glass-panel rounded-3xl p-4 overflow-hidden flex flex-col min-w-0">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Workspace Explorer</div>
+              <div class="text-sm text-base-content/70" x-text="activeSession ? (primaryWorkspace() || activeSession.workspace_path) : 'Select a session'"></div>
             </div>
-          </template>
-          <div x-show="isExecuting" class="flex gap-2 items-center text-xs text-secondary italic px-4 py-2">
-            <span class="loading loading-spinner loading-sm"></span> Awaiting agent cognition cycle...
+            <div class="flex items-center gap-2" x-show="activeSession">
+              <span class="badge badge-secondary badge-outline" x-text="activeSession ? activeSession.user_role : ''"></span>
+              <span class="badge badge-accent badge-outline" x-text="activeSession ? activeSession.risk_mode : ''"></span>
+            </div>
           </div>
-        </div>
-
-        <!-- Chat Input -->
-        <div class="p-4 bg-slate-900/60 border-t border-white/5">
-          <div
-            class="join w-full bg-base-300 rounded-xl shadow-inner border border-white/10 focus-within:border-secondary transition-colors">
-            <input class="input input-ghost join-item flex-1 text-sm focus:outline-none bg-transparent"
-              placeholder="Instruct the agent..." x-model="userInput" @keyup.enter="dispatchTask()"
-              :disabled="!activeSession" />
-            <button class="btn btn-secondary join-item border-none" @click="dispatchTask()"
-              :disabled="!userInput || isExecuting || !activeSession">
-              <i data-lucide="send" class="w-4 h-4"></i>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Bottom Sandbox Area (Dropzones) -->
-      <div class="glass-panel h-48 rounded-2xl p-4 flex flex-col shrink-0" x-show="activeSession" x-cloak>
-        <div class="flex justify-between items-center mb-2">
-          <div class="flex items-center gap-4">
-            <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">Session Sandbox Bounds</span>
-            <select class="select select-bordered select-xs bg-base-300 text-xs"
-              :value="activeSession ? activeSession.risk_mode : 'auto'"
-              @change="activeSession && (activeSession.risk_mode = $event.target.value, patchSessionConfig())">
-              <option value="auto">Risk Mode: Auto</option>
-              <option value="ask">Risk Mode: Ask (Approval)</option>
-              <option value="bypass">Risk Mode: Bypass</option>
-            </select>
-          </div>
-          <button class="btn btn-xs btn-outline btn-accent" @click="saveSessionConstraints()">Lock Sandbox
-            &rarr;</button>
-        </div>
-
-        <div class="flex gap-4 flex-1 h-full">
-          <div
-            class="flex-1 bg-black/30 rounded-xl border border-dashed border-white/20 p-2 flex flex-col relative overflow-hidden">
-            <span class="absolute top-2 left-3 text-[10px] text-white/40 font-mono">Allowed Skills</span>
-            <div id="drop-skills" class="flex-1 mt-4 overflow-y-auto space-y-1 p-1 min-h-[50px]"></div>
-          </div>
-
-          <div
-            class="flex-1 bg-black/30 rounded-xl border border-dashed border-white/20 p-2 flex flex-col relative overflow-hidden">
-            <span class="absolute top-2 left-3 text-[10px] text-white/40 font-mono">Bound MCP Servers</span>
-            <div id="drop-mcps" class="flex-1 mt-4 overflow-y-auto space-y-1 p-1 min-h-[50px]"></div>
-          </div>
-
-          <div
-            class="flex-1 bg-black/30 rounded-xl border border-dashed border-white/20 p-2 flex flex-col relative overflow-hidden">
-            <span class="absolute top-2 left-3 text-[10px] text-white/40 font-mono">Bound Workspaces</span>
-            <div id="drop-folders" class="flex-1 mt-4 overflow-y-auto space-y-1 p-1 min-h-[50px]"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-
-    <!-- RIGHT PANE -->
-    <div class="w-1/3 flex flex-col gap-4 h-full">
-
-      <div class="tabs tabs-boxed bg-slate-900/40 p-1 border border-white/10 shrink-0">
-        <a class="tab tab-sm flex-1 transition-all"
-          :class="rightTab==='toolbox'?'tab-active bg-primary text-black font-bold':''"
-          @click="rightTab='toolbox'">Toolbox Engine</a>
-        <a class="tab tab-sm flex-1 transition-all"
-          :class="rightTab==='marketplace'?'tab-active bg-secondary text-black font-bold':''"
-          @click="rightTab='marketplace'">MCP Hub</a>
-        <a class="tab tab-sm flex-1 transition-all"
-          :class="rightTab==='provider'?'tab-active bg-accent text-black font-bold':''"
-          @click="rightTab='provider'">System Config</a>
-      </div>
-
-      <!-- TOOLBOX TAB (Draggables) -->
-      <div x-show="rightTab==='toolbox'" class="glass-panel flex-1 rounded-2xl flex flex-col p-4 overflow-hidden gap-4">
-        <!-- Skills -->
-        <div class="flex-1 flex flex-col overflow-hidden">
-          <div class="flex justify-between items-center mb-2">
-            <span class="text-[11px] font-bold text-gray-400 tracking-wider">GLOBAL SKILL REGISTRY</span>
-            <button class="btn btn-xs btn-ghost" onclick="addSkillModal.showModal()"><i data-lucide="plus"
-                class="w-3 h-3"></i></button>
-          </div>
-          <div id="source-skills"
-            class="bg-black/20 rounded-lg flex-1 overflow-y-auto p-2 space-y-1 border border-white/5"></div>
-        </div>
-
-        <!-- MCPs -->
-        <div class="flex-1 flex flex-col overflow-hidden">
-          <div class="flex justify-between items-center mb-2">
-            <span class="text-[11px] font-bold text-gray-400 tracking-wider">AVAILABLE MCP SERVERS</span>
-            <button class="btn btn-xs btn-ghost text-primary"
-              @click="document.getElementById('mcpHubModal').showModal()"><i data-lucide="blocks"
-                class="w-3 h-3"></i></button>
-          </div>
-          <div id="source-mcps"
-            class="bg-black/20 rounded-lg flex-1 overflow-y-auto p-2 space-y-1 border border-white/5"></div>
-        </div>
-
-        <!-- Folders -->
-        <div class="flex-1 flex flex-col overflow-hidden">
-          <div class="flex justify-between items-center mb-2">
-            <span class="text-[11px] font-bold text-gray-400 tracking-wider">LOCAL FOLDERS</span>
-            <button class="btn btn-xs btn-ghost text-secondary" @click="addNativeFolder()"><i data-lucide="folder-plus"
-                class="w-3 h-3"></i></button>
-          </div>
-          <div id="source-folders"
-            class="bg-black/20 rounded-lg flex-1 overflow-y-auto p-2 space-y-1 border border-white/5"></div>
-        </div>
-      </div>
-
-
-
-      <!-- PROVIDERS & SETTINGS TAB -->
-      <div x-show="rightTab==='provider'" class="glass-panel flex-1 rounded-2xl p-6 overflow-y-auto space-y-6">
-
-        <!-- System Features Config -->
-        <div class="bg-black/20 p-4 rounded-xl border border-white/5">
-          <h3 class="text-xs font-bold text-accent tracking-widest uppercase mb-4 flex items-center gap-2">
-            <i data-lucide="network" class="w-4 h-4"></i> Mesh Architecture
-          </h3>
-
-          <div class="space-y-3">
-            <label class="cursor-pointer label">
-              <span class="label-text text-xs">A2A Peer-to-Peer Mesh</span>
-              <input type="checkbox" class="toggle toggle-accent toggle-sm" x-model="sysConfig.mesh_p2p"
-                @change="patchSystemConfig('mesh_p2p')" />
-            </label>
-            <label class="cursor-pointer label">
-              <span class="label-text text-xs">GTM Autonomous Swarm</span>
-              <input type="checkbox" class="toggle toggle-accent toggle-sm" x-model="sysConfig.gtm_swarm"
-                @change="patchSystemConfig('gtm_swarm')" />
-            </label>
-            <label class="cursor-pointer label">
-              <span class="label-text text-xs">SRE Watchdog Swarm</span>
-              <input type="checkbox" class="toggle toggle-accent toggle-sm" x-model="sysConfig.sre_swarm"
-                @change="patchSystemConfig('sre_swarm')" />
-            </label>
-          </div>
-        </div>
-
-        <!-- LLM Config -->
-        <div>
-          <h3 class="text-xs font-bold text-gray-400 tracking-widest uppercase mb-4">Inference Provider</h3>
-          <label class="form-control w-full mb-3">
-            <div class="label"><span class="label-text text-xs">Primary Vendor / Model</span></div>
-            <select class="select select-bordered select-sm w-full bg-base-300" x-model="activeModel"
-              @change="patchModelConfig()">
-              <option value="ollama/qwen2.5-coder:7b-instruct-q4_K_M">Local via Ollama (Qwen2.5)</option>
-              <option value="anthropic/claude-3-5-sonnet-20241022">Anthropic (Claude 3.5 Sonnet)</option>
-              <option value="openai/gpt-4o">OpenAI (GPT-4o)</option>
-              <option value="google/gemini-2.5-pro">Google (Gemini 2.5 Pro)</option>
-            </select>
-          </label>
-
-          <label class="form-control w-full mb-3" x-show="activeModel.startsWith('anthropic')">
-            <div class="label"><span class="label-text text-xs">Anthropic API Key</span></div>
-            <input type="password" class="input input-sm input-bordered w-full bg-base-300" x-model="apiKeys.anthropic"
-              @change="patchModelConfig()" placeholder="sk-ant-...">
-          </label>
-
-          <label class="form-control w-full mb-3" x-show="activeModel.startsWith('openai')">
-            <div class="label"><span class="label-text text-xs">OpenAI API Key</span></div>
-            <input type="password" class="input input-sm input-bordered w-full bg-base-300" x-model="apiKeys.openai"
-              @change="patchModelConfig()" placeholder="sk-...">
-          </label>
-        </div>
-
-        <div>
-          <h3 class="text-xs font-bold text-gray-400 tracking-widest uppercase mb-4 mt-6">Active Sessions</h3>
-          <div class="space-y-2">
-            <template x-for="s in loadedSessions" :key="s.id">
-              <div class="flex items-center justify-between p-3 rounded-lg border transition-colors group"
-                :class="activeSession?.id === s.id ? 'border-primary bg-primary/10' : 'border-white/10 hover:border-white/30 bg-black/20'">
-                <div class="flex-1 cursor-pointer" @click="switchSession(s)">
-                  <div class="text-sm font-semibold" x-text="s.user_id"></div>
-                </div>
-                <button class="btn btn-ghost btn-xs text-error opacity-0 group-hover:opacity-100 transition-opacity"
-                  @click.stop="deleteSession(s.id)">
-                  <i data-lucide="trash-2" class="w-4 h-4"></i>
-                </button>
-              </div>
+          <div class="flex-1 overflow-y-auto space-y-1 text-sm">
+            <template x-if="!activeSession">
+              <div class="h-full flex items-center justify-center text-base-content/45">Create or select a session to mount a workspace.</div>
+            </template>
+            <template x-for="node in explorerNodes" :key="node.path">
+              <button class="w-full text-left rounded-xl px-3 py-2 bg-black/20 border border-white/5 flex items-center gap-2 hover:border-primary/40"
+                @click="openNode(node)"
+                :style="`margin-left:${node.depth * 14}px`">
+                <i :data-lucide="node.type === 'directory' ? 'folder-open' : 'file-code-2'" class="w-4 h-4 text-base-content/55"></i>
+                <span class="truncate" x-text="node.name"></span>
+              </button>
             </template>
           </div>
+          </div>
+          <div id="pane-editor" class="glass-panel rounded-3xl p-4 overflow-hidden flex flex-col min-w-0">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Editor</div>
+                <div class="text-sm text-base-content/70 truncate" x-text="selectedFile || 'Select a file from explorer'"></div>
+              </div>
+              <button class="btn btn-xs btn-primary" :disabled="!activeSession || !selectedFile" @click="saveEditorFile()">Save</button>
+            </div>
+            <textarea class="textarea textarea-bordered flex-1 bg-slate-950/80 border border-white/5 font-mono text-xs text-slate-200" x-model="selectedFileContent" :disabled="!selectedFile"></textarea>
+          </div>
+          <div id="pane-terminal" class="glass-panel rounded-3xl p-4 overflow-hidden flex flex-col min-w-0">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Terminal</div>
+                <div class="text-sm text-base-content/70">Session-governed shell execution</div>
+              </div>
+              <span class="badge badge-outline" x-text="primaryWorkspace() || 'workspace'"></span>
+            </div>
+            <pre class="flex-1 overflow-auto text-xs rounded-2xl bg-slate-950/80 border border-white/5 p-4 text-slate-200"><code x-text="terminalOutput || 'Run a command inside the active session workspace.'"></code></pre>
+            <div class="join w-full mt-3">
+              <input class="input input-bordered join-item flex-1 bg-base-200/80 font-mono text-xs"
+                x-model="terminalCommand"
+                placeholder="npm test / pytest / git status"
+                @keyup.enter="runTerminal()"
+                :disabled="!activeSession || terminalBusy">
+              <button class="btn btn-secondary join-item" :disabled="!activeSession || terminalBusy || !terminalCommand.trim()" @click="runTerminal()">Run</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-panel rounded-3xl flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+            <div>
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Chat + Timeline</div>
+              <div class="text-sm text-base-content/70">Session-governed runtime execution</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="badge badge-outline" x-text="`Skills ${sessionStats().skills.length}`"></span>
+              <span class="badge badge-outline" x-text="`MCP ${sessionStats().mcp_servers.length}`"></span>
+              <span class="badge badge-outline" x-text="`A2A ${sessionStats().a2a_peers.length}`"></span>
+            </div>
+          </div>
+          <div id="chatArea" class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+            <template x-if="!chatLog.length">
+              <div class="h-full flex items-center justify-center text-base-content/45">The backend is ready. Start with a session message.</div>
+            </template>
+            <template x-for="(msg, idx) in chatLog" :key="`${idx}-${msg.timestamp || idx}`">
+              <div class="chat" :class="msg.role === 'user' ? 'chat-end' : 'chat-start'">
+                <div class="chat-header text-[10px] opacity-50 mb-1 flex items-center gap-2">
+                  <span x-text="msg.role === 'user' ? 'Operator' : (msg.role === 'tool' ? 'Tool Event' : 'Kernel Agent')"></span>
+                  <span x-text="formatTime(msg.timestamp)"></span>
+                </div>
+                <div class="chat-bubble prose prose-sm prose-invert max-w-[85%]"
+                  :class="msg.role === 'user' ? 'bg-primary text-primary-content' : (msg.role === 'tool' ? 'bg-slate-800 text-slate-200' : 'glass-panel')"
+                  x-html="marked.parse(msg.content || '')"></div>
+              </div>
+            </template>
+            <div x-show="isExecuting" class="flex items-center gap-2 text-sm italic text-secondary">
+              <span class="loading loading-spinner loading-sm"></span> Agent loop running...
+            </div>
+          </div>
+          <div class="p-4 border-t border-white/5">
+            <div class="join w-full">
+              <input class="input input-bordered join-item flex-1 bg-base-200/80"
+                placeholder="Ask, plan, code, or operate..."
+                x-model="userInput"
+                @keyup.enter="dispatchTask()"
+                :disabled="!activeSession">
+              <button class="btn btn-secondary join-item" @click="dispatchTask()" :disabled="!activeSession || isExecuting || !userInput.trim()">
+                <i data-lucide="send" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
-    </div>
-  </div>
+      <div id="workbench-side" class="flex flex-col gap-4 min-h-0 pl-2">
+        <div class="tabs tabs-boxed bg-slate-900/40 p-1 border border-white/10 shrink-0">
+          <a class="tab flex-1" :class="rightTab==='project' ? 'tab-active bg-primary text-black font-semibold' : ''" @click="switchTab('project')">Project</a>
+          <a class="tab flex-1" :class="rightTab==='session' ? 'tab-active bg-secondary text-black font-semibold' : ''" @click="switchTab('session')">Session</a>
+          <a class="tab flex-1" :class="rightTab==='runtime' ? 'tab-active bg-accent text-black font-semibold' : ''" @click="switchTab('runtime')">Runtime</a>
+          <a class="tab flex-1" :class="rightTab==='ops' ? 'tab-active bg-success text-black font-semibold' : ''" @click="switchTab('ops')">Ops</a>
+        </div>
 
-  <!-- MODALS -->
-  <dialog id="mcpHubModal" class="modal">
-    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content max-w-2xl">
-      <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button></form>
-      <h3 class="font-bold text-lg text-primary flex items-center gap-2 mb-4"><i data-lucide="globe"
-          class="w-5 h-5"></i> Community MCP Hub</h3>
-
-      <div class="flex justify-between items-center mb-4">
-        <p class="text-xs text-gray-400">1-click install verified Model Context Protocols.</p>
-        <button class="btn btn-xs btn-outline btn-secondary" onclick="addMcpModal.showModal()">Custom CLI Link</button>
-      </div>
-
-      <div class="space-y-3 max-h-[50vh] overflow-y-auto pr-2">
-        <template x-for="m in marketplaceList" :key="m.name">
-          <div class="bg-black/20 p-4 rounded-xl border border-white/10 hover:border-secondary/50 transition-colors">
-            <div class="flex justify-between items-start mb-2">
-              <div class="font-bold text-sm text-white flex items-center gap-2">
-                <i data-lucide="blocks" class="w-4 h-4 text-secondary"></i> <span x-text="m.name"></span>
+        <div x-show="rightTab==='project'" class="glass-panel rounded-3xl flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Global Skills</div>
+                <div class="text-sm text-base-content/65">Project-level capability registry</div>
               </div>
-              <button class="btn btn-xs btn-secondary" @click="oneClickInstall(m)">Install</button>
             </div>
-            <div class="text-[10px] text-gray-400 leading-relaxed mb-2" x-text="m.desc"></div>
-            <div class="text-[9px] font-mono text-gray-500 truncate" x-text="m.cmd"></div>
-          </div>
-        </template>
+            <div class="space-y-2">
+              <template x-for="skill in project.skills" :key="skill.name">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="font-medium" x-text="skill.name"></span>
+                      <span class="badge badge-ghost badge-sm" x-text="skill.pack"></span>
+                      <span class="badge badge-outline badge-sm" x-text="skill.level"></span>
+                    </div>
+                    <div class="text-xs text-base-content/55 mt-1" x-text="skill.description"></div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button class="btn btn-xs" :class="skill.enabled ? 'btn-warning' : 'btn-ghost'" @click="toggleSkill(skill)" x-text="skill.enabled ? 'Disable' : 'Enable'"></button>
+                    <button class="btn btn-xs" :class="isSessionBound('skill', skill.name) ? 'btn-primary' : 'btn-ghost'" :disabled="!activeSession" @click="toggleSessionItem('skill', skill.name)" x-text="isSessionBound('skill', skill.name) ? 'Bound' : 'Bind'"></button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Global MCP Registry</div>
+                <div class="text-sm text-base-content/65">Install once, bind per session</div>
+              </div>
+              <button class="btn btn-xs btn-outline btn-secondary" onclick="document.getElementById('addMcpModal').showModal()">Add MCP</button>
+            </div>
+            <div class="space-y-2">
+              <template x-for="server in project.mcp_servers" :key="server.name">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="font-medium" x-text="server.name"></span>
+                      <span class="badge badge-sm" :class="statusClass(server.status)" x-text="server.status"></span>
+                    </div>
+                    <div class="text-xs text-base-content/55 mt-1" x-text="`${server.command} ${(server.args || []).join(' ')}`"></div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button class="btn btn-xs" :class="server.disabled ? 'btn-success' : 'btn-warning'" @click="toggleMcp(server)" x-text="server.disabled ? 'Enable' : 'Disable'"></button>
+                    <button class="btn btn-xs btn-ghost" :disabled="server.disabled || server.status === 'connected'" @click="controlMcp(server.name, 'start')">Start</button>
+                    <button class="btn btn-xs btn-ghost" :disabled="server.status !== 'connected'" @click="controlMcp(server.name, 'stop')">Stop</button>
+                    <button class="btn btn-xs" :class="isSessionBound('mcp', server.name) ? 'btn-primary' : 'btn-ghost'" :disabled="!activeSession || server.disabled" @click="toggleSessionItem('mcp', server.name)" x-text="isSessionBound('mcp', server.name) ? 'Bound' : 'Bind'"></button>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <div class="divider text-xs text-base-content/40">Quick Install</div>
+            <div class="space-y-2">
+              <template x-for="item in marketplaceList" :key="item.name">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-medium" x-text="item.name"></div>
+                    <div class="text-xs text-base-content/55" x-text="item.desc"></div>
+                  </div>
+                  <button class="btn btn-xs btn-secondary" @click="oneClickInstall(item)">Install</button>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Project Folders</div>
+                <div class="text-sm text-base-content/65">Global workspace roots</div>
+              </div>
+              <button class="btn btn-xs btn-outline btn-accent" @click="openAddFolder()">Add Folder</button>
+            </div>
+            <div class="space-y-2">
+              <template x-for="folder in project.folders" :key="folder.path">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3 flex items-center justify-between gap-3">
+                  <div class="truncate">
+                    <div class="font-medium truncate" x-text="folder.label"></div>
+                    <div class="text-xs text-base-content/55 truncate" x-text="folder.path"></div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button class="btn btn-xs btn-error btn-ghost" @click="removeProjectFolder(folder.path)">Remove</button>
+                    <button class="btn btn-xs" :class="isSessionBound('folder', folder.path) ? 'btn-primary' : 'btn-ghost'" :disabled="!activeSession" @click="toggleSessionItem('folder', folder.path)" x-text="isSessionBound('folder', folder.path) ? 'Bound' : 'Bind'"></button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">A2A Mesh</div>
+                <div class="text-sm text-base-content/65" x-text="project.a2a.agent_name || 'Agent mesh'"></div>
+              </div>
+              <span class="badge badge-outline" x-text="`Peers ${(project.a2a.peers || []).length}`"></span>
+            </div>
+            <div class="grid grid-cols-3 gap-2 mb-3 text-xs">
+              <div class="rounded-2xl bg-slate-950/30 p-3 border border-white/8">
+                <div class="text-base-content/45">Healthy</div>
+                <div class="text-lg font-semibold" x-text="project.a2a.mesh.healthy || 0"></div>
+              </div>
+              <div class="rounded-2xl bg-slate-950/30 p-3 border border-white/8">
+                <div class="text-base-content/45">Total</div>
+                <div class="text-lg font-semibold" x-text="project.a2a.mesh.total_peers || 0"></div>
+              </div>
+              <div class="rounded-2xl bg-slate-950/30 p-3 border border-white/8">
+                <div class="text-base-content/45">Protocol</div>
+                <div class="text-lg font-semibold" x-text="project.a2a.protocol_version || '0.3'"></div>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <template x-for="peer in project.a2a.peers" :key="peer.id">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-medium" x-text="peer.name"></div>
+                    <div class="text-xs text-base-content/55" x-text="peer.status"></div>
+                  </div>
+                  <button class="btn btn-xs" :class="isPeerBound(peer.id) ? 'btn-primary' : 'btn-ghost'" :disabled="!activeSession || !activeSession.a2a_enabled" @click="toggleA2APeer(peer.id)" x-text="isPeerBound(peer.id) ? 'Bound' : 'Bind'"></button>
+                </div>
+              </template>
+            </div>
+            <div class="join w-full mt-3">
+              <input class="input input-bordered join-item flex-1 bg-base-200/80"
+                x-model="a2aDraft"
+                placeholder="Delegate an A2A task to the first healthy peer">
+              <button class="btn btn-secondary join-item" :disabled="!(project.a2a.peers || []).length || !a2aDraft.trim()" @click="delegateA2A()">Dispatch</button>
+            </div>
+            <div class="mt-4 rounded-2xl border border-white/8 bg-slate-950/30 overflow-hidden">
+              <div class="px-3 py-2 text-xs uppercase tracking-[0.3em] text-base-content/45 border-b border-white/8">Mesh Topology</div>
+              <div id="a2a-topology" class="h-48 w-full"></div>
+            </div>
+          </section>
+        </div>
+
+        <div x-show="rightTab==='session'" class="glass-panel rounded-3xl flex-1 min-h-0 overflow-y-auto p-4 space-y-4" x-cloak>
+          <template x-if="activeSession">
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Session Governance</div>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="form-control">
+                <span class="label-text text-xs">Role</span>
+                <select class="select select-bordered bg-base-200" :value="sessionStats().user_role" @change="activeSession && (activeSession.user_role = $event.target.value, saveSessionGovernance())">
+                  <option value="viewer">viewer</option>
+                  <option value="developer">developer</option>
+                  <option value="admin">admin</option>
+                  <option value="agent">agent</option>
+                </select>
+              </label>
+              <label class="form-control">
+                <span class="label-text text-xs">Risk Mode</span>
+                <select class="select select-bordered bg-base-200" :value="sessionStats().risk_mode" @change="activeSession && (activeSession.risk_mode = $event.target.value, saveSessionGovernance())">
+                  <option value="auto">auto</option>
+                  <option value="ask">ask</option>
+                  <option value="bypass">bypass</option>
+                </select>
+              </label>
+            </div>
+            <label class="label cursor-pointer mt-3">
+              <span class="label-text">Enable A2A for this session</span>
+              <input type="checkbox" class="toggle toggle-secondary" :checked="sessionStats().a2a_enabled" @change="activeSession && (activeSession.a2a_enabled = $event.target.checked, saveSessionGovernance())">
+            </label>
+            <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
+              <div class="rounded-2xl bg-slate-950/30 p-3 border border-white/8">
+                <div class="text-base-content/45">Bound Skills</div>
+                <div class="text-lg font-semibold" x-text="sessionStats().skills.length"></div>
+              </div>
+              <div class="rounded-2xl bg-slate-950/30 p-3 border border-white/8">
+                <div class="text-base-content/45">Bound MCPs</div>
+                <div class="text-lg font-semibold" x-text="sessionStats().mcp_servers.length"></div>
+              </div>
+              <div class="rounded-2xl bg-slate-950/30 p-3 border border-white/8">
+                <div class="text-base-content/45">Bound Folders</div>
+                <div class="text-lg font-semibold" x-text="sessionStats().folders.length"></div>
+              </div>
+            </div>
+          </section>
+          </template>
+          <template x-if="!activeSession">
+            <section class="bg-black/20 rounded-2xl p-6 border border-white/5 text-base-content/50">
+              Create a session to bind project skills, MCPs, folders, and A2A peers.
+            </section>
+          </template>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Sessions</div>
+            <div class="space-y-2">
+              <template x-for="session in loadedSessions" :key="session.session_id">
+                <div class="rounded-2xl border p-3 flex items-center justify-between gap-3"
+                  :class="activeSession && activeSession.session_id === session.session_id ? 'border-primary bg-primary/10' : 'border-white/8 bg-slate-950/30'">
+                  <div class="cursor-pointer flex-1" @click="switchSession(session)">
+                    <div class="font-medium" x-text="session.user_id"></div>
+                    <div class="text-xs text-base-content/55" x-text="session.workspace_path"></div>
+                  </div>
+                  <button class="btn btn-xs btn-error btn-ghost" @click="deleteSession(session.session_id)">Delete</button>
+                </div>
+              </template>
+            </div>
+          </section>
+        </div>
+
+        <div x-show="rightTab==='runtime'" class="glass-panel rounded-3xl flex-1 min-h-0 overflow-y-auto p-4 space-y-4" x-cloak>
+          <section class="grid grid-cols-4 gap-3">
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/45">Runtime</div>
+              <div class="text-lg font-semibold mt-2" x-text="(ops.fullStatus && ops.fullStatus.runtime && ops.fullStatus.runtime.mode) || 'unknown'"></div>
+            </div>
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/45">Tasks</div>
+              <div class="text-lg font-semibold mt-2" x-text="(ops.fullStatus && ops.fullStatus.tasks && ops.fullStatus.tasks.active) || 0"></div>
+            </div>
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/45">Sessions</div>
+              <div class="text-lg font-semibold mt-2" x-text="(ops.fullStatus && ops.fullStatus.sessions && ops.fullStatus.sessions.active) || 0"></div>
+            </div>
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/45">Features</div>
+              <div class="text-lg font-semibold mt-2" x-text="((ops.fullStatus && ops.fullStatus.features) || []).length"></div>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Model Routing</div>
+            <label class="form-control">
+              <span class="label-text text-xs">Active Model</span>
+              <select class="select select-bordered bg-base-200" x-model="activeModel" @change="patchModelConfig()">
+                <option value="ollama/qwen2.5-coder:7b-instruct-q4_K_M">Local via Ollama</option>
+                <option value="anthropic/claude-3-5-sonnet-20241022">Anthropic</option>
+                <option value="openai/gpt-4o">OpenAI</option>
+                <option value="google/gemini-2.5-pro">Google</option>
+              </select>
+            </label>
+            <label class="form-control mt-3" x-show="activeModel.startsWith('anthropic')">
+              <span class="label-text text-xs">Anthropic API Key</span>
+              <input class="input input-bordered bg-base-200" type="password" x-model="apiKeys.anthropic" @change="patchModelConfig()">
+            </label>
+            <label class="form-control mt-3" x-show="activeModel.startsWith('openai')">
+              <span class="label-text text-xs">OpenAI API Key</span>
+              <input class="input input-bordered bg-base-200" type="password" x-model="apiKeys.openai" @change="patchModelConfig()">
+            </label>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Providers Live</div>
+              <button class="btn btn-xs btn-ghost" @click="loadOpsData(true)">Refresh</button>
+            </div>
+            <div class="space-y-2">
+              <template x-for="provider in ((ops.providers && ops.providers.providers) || [])" :key="provider.name">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div class="font-medium" x-text="provider.name"></div>
+                    <div class="text-xs text-base-content/55" x-text="provider.default_model || provider.base_url || provider.api_key_env || 'not configured'"></div>
+                  </div>
+                  <span class="badge badge-sm" :class="providerStatusClass(provider)" x-text="provider.reachable ? 'reachable' : (provider.enabled ? 'configured' : 'disabled')"></span>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Feature Flags</div>
+            <label class="label cursor-pointer">
+              <span class="label-text">Mesh P2P</span>
+              <input type="checkbox" class="toggle toggle-accent" x-model="sysConfig.mesh_p2p" @change="patchSystemConfig('mesh_p2p')">
+            </label>
+            <label class="label cursor-pointer">
+              <span class="label-text">GTM Swarm</span>
+              <input type="checkbox" class="toggle toggle-accent" x-model="sysConfig.gtm_swarm" @change="patchSystemConfig('gtm_swarm')">
+            </label>
+            <label class="label cursor-pointer">
+              <span class="label-text">SRE Swarm</span>
+              <input type="checkbox" class="toggle toggle-accent" x-model="sysConfig.sre_swarm" @change="patchSystemConfig('sre_swarm')">
+            </label>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Governance Defaults</div>
+            <div class="space-y-2 text-sm">
+              <div class="flex items-center justify-between">
+                <span class="text-base-content/60">Default Role</span>
+                <span x-text="project.governance_defaults.default_role || 'developer'"></span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-base-content/60">Approval Rules</span>
+                <span x-text="(project.governance_defaults.require_approval_for || []).length"></span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-base-content/60">Network Allowlist</span>
+                <span x-text="(project.governance_defaults.network_allowlist || []).length"></span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div x-show="rightTab==='ops'" class="glass-panel rounded-3xl flex-1 min-h-0 overflow-y-auto p-4 space-y-4" x-cloak>
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Approvals</div>
+              <span class="badge badge-outline" x-text="ops.approvals.length"></span>
+            </div>
+            <div class="space-y-2">
+              <template x-if="!ops.approvals.length">
+                <div class="text-sm text-base-content/50">No pending approvals.</div>
+              </template>
+              <template x-for="approval in ops.approvals" :key="approval.approval_id">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3">
+                  <div class="font-medium" x-text="approval.tool_name"></div>
+                  <div class="text-xs text-base-content/55 mt-1" x-text="approval.created_at"></div>
+                  <div class="flex gap-2 mt-3">
+                    <button class="btn btn-xs btn-success" @click="resolveApproval(approval.approval_id, true)">Approve</button>
+                    <button class="btn btn-xs btn-error" @click="resolveApproval(approval.approval_id, false)">Reject</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Governance Audit</div>
+              <button class="btn btn-xs btn-ghost" @click="loadOpsData(true)">Refresh</button>
+            </div>
+            <div class="space-y-2 max-h-64 overflow-y-auto">
+              <template x-for="entry in ops.audit.slice(0, 20)" :key="entry.id || entry.timestamp">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="font-medium truncate" x-text="entry.tool_name || entry.action || 'event'"></span>
+                    <span class="text-xs font-semibold" :class="auditDecisionClass(entry)" x-text="entry.decision || 'LOGGED'"></span>
+                  </div>
+                  <div class="text-xs text-base-content/55 mt-1" x-text="entry.timestamp || ''"></div>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="grid grid-cols-2 gap-4">
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Jobs</div>
+              <div class="space-y-2 max-h-64 overflow-y-auto">
+                <template x-for="job in ops.jobs.slice(0, 12)" :key="job.id">
+                  <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3">
+                    <div class="flex items-center justify-between gap-3">
+                      <span class="font-medium truncate" x-text="job.kind || job.id"></span>
+                      <span class="badge badge-sm" :class="jobStatusClass(job.status)" x-text="job.status || 'unknown'"></span>
+                    </div>
+                    <div class="text-xs text-base-content/55 mt-1" x-text="job.id"></div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Artifacts</div>
+              <div class="space-y-2 max-h-64 overflow-y-auto">
+                <template x-for="artifact in ops.artifacts.slice(0, 12)" :key="artifact.id">
+                  <button class="w-full text-left rounded-2xl border border-white/8 bg-slate-950/30 p-3 hover:border-primary/40" @click="viewArtifact(artifact.id)">
+                    <div class="font-medium truncate" x-text="artifact.name || artifact.type || artifact.id"></div>
+                    <div class="text-xs text-base-content/55 mt-1" x-text="artifact.id"></div>
+                  </button>
+                </template>
+              </div>
+              <div x-show="artifactPreview" class="mt-3 rounded-2xl border border-white/8 bg-slate-950/40 p-3 text-xs">
+                <div class="font-medium mb-2" x-text="artifactPreview ? artifactPreview.name || artifactPreview.id : ''"></div>
+                <pre class="overflow-auto whitespace-pre-wrap"><code x-text="artifactPreview ? JSON.stringify(artifactPreview.content, null, 2) : ''"></code></pre>
+              </div>
+            </div>
+          </section>
+
+          <section class="grid grid-cols-2 gap-4">
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Workspace Scope</div>
+              <div class="space-y-2 text-sm">
+                <div class="flex items-center justify-between">
+                  <span class="text-base-content/60">Primary Root</span>
+                  <span class="truncate max-w-[12rem]" x-text="primaryWorkspace() || 'none'"></span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-base-content/60">Files Visible</span>
+                  <span x-text="explorerNodes.filter(node => node.type === 'file').length"></span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-base-content/60">Directories</span>
+                  <span x-text="explorerNodes.filter(node => node.type === 'directory').length"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="bg-black/20 rounded-2xl p-4 border border-white/5">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50 mb-3">Agent Surface</div>
+              <div class="space-y-2 text-sm">
+                <div class="flex items-center justify-between">
+                  <span class="text-base-content/60">Conversation Events</span>
+                  <span x-text="chatLog.length"></span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-base-content/60">Pending Approvals</span>
+                  <span x-text="ops.approvals.length"></span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-base-content/60">Runtime Jobs</span>
+                  <span x-text="ops.jobs.length"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Event Stream</div>
+              <button class="btn btn-xs btn-ghost" @click="loadOpsData(true)">Refresh</button>
+            </div>
+            <div class="space-y-2 max-h-72 overflow-y-auto">
+              <template x-for="event in ops.events.slice().reverse()" :key="event.id">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="font-medium truncate" x-text="event.type"></span>
+                    <span class="text-xs text-base-content/55" x-text="event.source"></span>
+                  </div>
+                  <div class="text-xs text-base-content/55 mt-1" x-text="event.timestamp"></div>
+                  <div class="text-[11px] text-base-content/45 mt-2 line-clamp-2" x-text="JSON.stringify(event.payload || {})"></div>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Memory Search</div>
+              <button class="btn btn-xs btn-secondary" :disabled="!memoryQuery.trim()" @click="searchMemory()">Search</button>
+            </div>
+            <div class="join w-full mb-3">
+              <input class="input input-bordered join-item flex-1 bg-base-200/80" x-model="memoryQuery" placeholder="Search long-term memory">
+              <button class="btn btn-ghost join-item" @click="searchMemory()">Go</button>
+            </div>
+            <div class="space-y-2 max-h-64 overflow-y-auto">
+              <template x-for="item in memoryResults" :key="item.id || item.content">
+                <div class="rounded-2xl border border-white/8 bg-slate-950/30 p-3">
+                  <div class="text-sm line-clamp-3" x-text="item.content || item.text || 'memory item'"></div>
+                  <div class="text-xs text-base-content/55 mt-1" x-text="item.category || item.context || ''"></div>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="bg-black/20 rounded-2xl p-4 border border-white/5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs uppercase tracking-[0.3em] text-base-content/50">Runtime YAML</div>
+              <button class="btn btn-xs btn-primary" @click="saveRuntimeYaml()">Save YAML</button>
+            </div>
+            <textarea class="textarea textarea-bordered w-full h-72 bg-slate-950/70 font-mono text-xs" x-model="ops.runtimeYaml"></textarea>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="addFolderModal" class="modal">
+    <div class="modal-box bg-slate-950 border border-white/10">
+      <h3 class="font-semibold text-lg mb-3">Add Project Folder</h3>
+      <input class="input input-bordered w-full bg-base-200" x-model="newFolder" placeholder="D:/path/to/workspace">
+      <div class="modal-action">
+        <form method="dialog"><button class="btn btn-ghost">Cancel</button></form>
+        <button class="btn btn-accent" @click="registerLocalFolder()">Save</button>
       </div>
     </div>
-    <form method="dialog" class="modal-backdrop"><button>close</button></form>
   </dialog>
 
   <dialog id="addMcpModal" class="modal">
-    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content">
-      <h3 class="font-bold text-lg text-primary flex items-center gap-2"><i data-lucide="terminal" class="w-5 h-5"></i>
-        Custom MCP Registration</h3>
-      <p class="py-4 text-xs text-gray-400">Provide direct CLI arguments for an unlisted MCP module.</p>
-
-      <input type="text" x-model="newMcp.name" placeholder="Name Alias (e.g., custom-postgres)"
-        class="input input-sm input-bordered w-full bg-base-300 mb-2" />
-      <input type="text" x-model="newMcp.command" placeholder="Command (e.g., npx)"
-        class="input input-sm input-bordered w-full bg-base-300 mb-2" />
-      <input type="text" x-model="newMcp.args" placeholder="Args (-y, @modelcontextprotocol/server-postgres, ...)"
-        class="input input-sm input-bordered w-full bg-base-300 mb-4" />
-
-      <div class="modal-action">
-        <form method="dialog"><button class="btn btn-sm btn-ghost">Cancel</button></form>
-        <button class="btn btn-sm btn-primary" @click="registerNewMCP()">Compile Server</button>
+    <div class="modal-box bg-slate-950 border border-white/10">
+      <h3 class="font-semibold text-lg mb-3">Register MCP Server</h3>
+      <div class="space-y-3">
+        <input class="input input-bordered w-full bg-base-200" x-model="newMcp.name" placeholder="filesystem-extra">
+        <input class="input input-bordered w-full bg-base-200" x-model="newMcp.command" placeholder="npx">
+        <input class="input input-bordered w-full bg-base-200" x-model="newMcp.args" placeholder="-y, @modelcontextprotocol/server-filesystem, ./workspace">
       </div>
-    </div>
-  </dialog>
-
-  <dialog id="addFolderModal" class="modal">
-    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content">
-      <h3 class="font-bold text-lg text-accent flex items-center gap-2"><i data-lucide="folder-plus"
-          class="w-5 h-5"></i> Mount Local Workspace</h3>
-      <p class="py-4 text-xs text-gray-400">Provide an absolute path to your local repository.</p>
-
-      <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
-        <span class="badge badge-accent badge-outline cursor-pointer"
-          @click="newFolder='./workspace'">./workspace</span>
-        <span class="badge badge-accent badge-outline cursor-pointer" @click="newFolder='C:/temp'">C:/temp</span>
-        <span class="badge badge-accent badge-outline cursor-pointer" @click="newFolder='/tmp'">/tmp</span>
-      </div>
-      <input type="text" x-model="newFolder" placeholder="Absolute Local Path"
-        class="input input-sm input-bordered w-full bg-base-300" />
-
       <div class="modal-action">
-        <form method="dialog"><button class="btn btn-sm btn-ghost">Cancel</button></form>
-        <button class="btn btn-sm btn-accent" @click="registerLocalFolder()">Mount Path</button>
-      </div>
-    </div>
-  </dialog>
-
-  <dialog id="addSkillModal" class="modal">
-    <div class="modal-box glass-panel border border-white/10 bg-slate-900/90 text-base-content">
-      <h3 class="font-bold text-lg text-yellow-500 flex items-center gap-2"><i data-lucide="braces" class="w-5 h-5"></i>
-        Agentic Skill Generator</h3>
-      <p class="py-4 text-xs text-gray-400">The LLM will compile a new native python Python skill function based on your
-        prompt.</p>
-      <input type="text" x-model="newSkillDesc" placeholder="Describe the skill (e.g., A tool to scrape weather data)"
-        class="input input-sm input-bordered w-full bg-base-300 mb-4" />
-
-      <div class="modal-action">
-        <form method="dialog"><button class="btn btn-sm btn-ghost">Cancel</button></form>
-        <button class="btn btn-sm btn-warning"
-          @click="alert('Skill Generator AI is booting up... (Backend integration required)'); addSkillModal.close();">Generate
-          Code</button>
+        <form method="dialog"><button class="btn btn-ghost">Cancel</button></form>
+        <button class="btn btn-primary" @click="registerNewMCP()">Save</button>
       </div>
     </div>
   </dialog>
