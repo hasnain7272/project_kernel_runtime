@@ -254,6 +254,25 @@ class MCPRegistry:
         
         cfg = MCPServerConfig.from_dict(name, config)
         self.servers[name] = MCPServerInstance(config=cfg)
+        
+        # Persist to runtime.yaml
+        try:
+            if os.path.exists(self.config_path):
+                with open(self.config_path, 'r') as f:
+                    full_cfg = yaml.safe_load(f) or {}
+                
+                if "mcpServers" not in full_cfg:
+                    full_cfg["mcpServers"] = {}
+                
+                full_cfg["mcpServers"][name] = config
+                
+                with open(self.config_path, 'w') as f:
+                    yaml.dump(full_cfg, f, default_flow_style=False)
+                
+                logger.info(f"[MCP] Persisted new server '{name}' to {self.config_path}")
+        except Exception as e:
+            logger.error(f"[MCP] Failed to persist server '{name}': {e}")
+
         logger.info(f"[MCP] Added server: {name}")
         return True
     

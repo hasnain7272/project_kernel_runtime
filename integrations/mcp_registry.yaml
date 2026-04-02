@@ -1,54 +1,12 @@
+# MCP Registry - Discovered MCP Servers
+# Auto-populated by UniversalMCP and MCPBridge
+
 BlenderMCP:
   status: connected
   tools:
-  - render_animation
-  - setup_lighting
-  - import_asset
-  - get_scene_hierarchy
+    - render_animation
+    - setup_lighting
+    - import_asset
+    - get_scene_hierarchy
   type: local
   url: http://localhost:8111/mcp
-mcp_1:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_2:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_3:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_4:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_5:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_6:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_7:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_8:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp
-mcp_9:
-  status: connected
-  tools: []
-  type: local
-  url: http://localhost:8080/mcp

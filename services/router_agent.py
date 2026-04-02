@@ -42,6 +42,8 @@ def _task_payload(task) -> Dict[str, Any]:
         "session_id": task.session_id,
         "error": task.error,
         "progress": task.progress,
+        "result": {"response": task.steps[0].result if task.steps and task.steps[0].result else ""},
+        "response": task.steps[0].result if task.steps and task.steps[0].result else "",  # Direct field for UI
         "steps": [
             {
                 "id": step.id,
@@ -81,7 +83,7 @@ async def _resolve_session(orchestrator, identifier: Optional[str], user_id: Opt
     return None
 
 
-async def _run_agent_task(orchestrator, task, user_id: str, session_id: str, description: str, max_iterations: int):
+async def _run_agent_task(orchestrator, task, user_id: str, session_id: str, description: str, max_iterations: int, context_bindings: Dict[str, Any] = None):
     try:
         state_hub.update_task_state(task.id, "running")
         result = await orchestrator.execute_agentic_loop(
@@ -89,6 +91,7 @@ async def _run_agent_task(orchestrator, task, user_id: str, session_id: str, des
             user_id=user_id,
             session_id=session_id,
             max_iterations=max_iterations,
+            context_bindings=context_bindings
         )
         task.complete_step(result)
         task.status = TaskStatus.COMPLETED
@@ -110,20 +113,19 @@ async def create_session(request: Dict[str, Any]):
     orchestrator = _get_orchestrator()
 
     user_id = request.get("user_id")
-    workspace_path = request.get("workspace_path")
+    workspace_path = request.get("workspace_path", "")
     mode = request.get("mode", "web")
 
-    if not user_id or not workspace_path:
-        raise HTTPException(status_code=400, detail="user_id and workspace_path required")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
 
     session = await orchestrator.start_session(user_id, workspace_path, mode)
     project_registry = build_project_registry(orchestrator=orchestrator)
-    session.user_role = project_registry["governance_defaults"].get("default_role", "developer")
-    session.skills = [item["name"] for item in project_registry["skills"] if item["enabled"]]
-    session.mcp_servers = [item["name"] for item in project_registry["mcp_servers"] if not item["disabled"]]
-    session.folders = [workspace_path]
-    session.a2a_enabled = bool(project_registry["a2a"].get("enabled"))
-    session.a2a_peers = [peer["id"] for peer in project_registry["a2a"].get("peers", [])]
+    session.skills = []
+    session.mcp_servers = []
+    session.folders = []
+    session.a2a_enabled = False 
+    session.a2a_peers = []
     orchestrator.sessions.update_session(session.session_id, session)
     return _session_payload(session)
 
@@ -131,7 +133,7 @@ async def create_session(request: Dict[str, Any]):
 @router.get("/sessions")
 async def list_sessions():
     orchestrator = _get_orchestrator()
-    sessions = [_session_payload(session) for session in orchestrator.sessions.sessions.values()]
+    sessions = [_session_payload(session) for session in orchestrator.sessions.sessions.values() if session.is_active]
     sessions.sort(key=lambda item: item["created_at"], reverse=True)
     return {"sessions": sessions}
 
@@ -238,7 +240,21 @@ async def get_session_skills(session_id: str):
     session = orchestrator.sessions.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return {"session_id": session_id, "skills": getattr(session, "skills", [])}
+    session_skills = getattr(session, "skills", [])
+    # Debug: get tools for these skills
+    tools = []
+    for skill_name in session_skills:
+        try:
+            skill_tools = orchestrator.skills.get_tools_for_skill(skill_name)
+            if skill_tools:
+                tools.extend(skill_tools)
+        except Exception:
+            pass
+    return {
+        "session_id": session_id, 
+        "skills": session_skills,
+        "available_tools": tools
+    }
 
 
 @router.post("/sessions/{session_id}/skills")
@@ -595,6 +611,63 @@ async def list_mcps():
         "protocols": list(registry.values()),
         "bridge": orchestrator.mcp_bridge.get_status(),
     }
+
+
+@router.post("/dispatch")
+async def dispatch_task(request: Dict[str, Any]):
+    orchestrator = _get_orchestrator()
+    session_id = request.get("session_id")
+    task_description = request.get("input", "").strip()
+    context_bindings = request.get("context_bindings", {})
+
+    if not session_id or not task_description:
+        raise HTTPException(status_code=400, detail="session_id and input required")
+
+    session = orchestrator.sessions.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Create Task
+    task = orchestrator.tasks.create_task(
+        type=TaskType.RESEARCH,
+        description=task_description,
+        steps=[TaskStep(id="agent_loop", description=task_description, tools=[])],
+        context=context_bindings,
+        session_id=session_id,
+    )
+    orchestrator.sessions.add_task_to_session(session_id, task.id)
+    orchestrator.sessions.add_message_to_session(session_id, "user", task_description)
+
+    # Start Background Loop
+    asyncio.create_task(_run_agent_task(
+        orchestrator,
+        task,
+        session.user_id,
+        session_id,
+        task_description,
+        max_iterations=int(request.get("max_iterations", 10)),
+        context_bindings=context_bindings
+    ))
+
+    return {"task_id": task.id, "status": "dispatched"}
+
+
+@router.post("/governance/approve/{approval_id}")
+async def approve_governance(approval_id: str):
+    orchestrator = _get_orchestrator()
+    success = await orchestrator.governance.resolve_approval(approval_id, approved=True)
+    if not success:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    return {"status": "approved"}
+
+
+@router.post("/governance/deny/{approval_id}")
+async def deny_governance(approval_id: str):
+    orchestrator = _get_orchestrator()
+    success = await orchestrator.governance.resolve_approval(approval_id, approved=False)
+    if not success:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    return {"status": "denied"}
 
 
 @router.post("/protocols/mcp/mount")

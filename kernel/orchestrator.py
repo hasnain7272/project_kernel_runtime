@@ -14,8 +14,10 @@ Claude Code agentic loop, Aider architect/editor dual model
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
 from functools import cached_property
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
@@ -150,8 +152,8 @@ class Orchestrator:
     @cached_property
     def swarm(self):
         from .swarm import AgentSwarm
-        sw = AgentSwarm(llm_provider=self.llm, event_bus=self.event_bus)
-        logger.info("[Orchestrator] AgentSwarm initialized")
+        sw = AgentSwarm(llm_provider=self.llm, event_bus=self.event_bus, tool_executor=self.tool_executor)
+        logger.info("[Orchestrator] AgentSwarm initialized with LLM + ToolExecutor")
         return sw
 
     @cached_property
@@ -363,16 +365,19 @@ class Orchestrator:
     async def execute_agentic_loop(self, task_description: str,
                                      user_id: str = "agent",
                                      session_id: str = None,
-                                     max_iterations: int = 20) -> Dict[str, Any]:
+                                     max_iterations: int = 20,
+                                     context_bindings: Dict[str, List[str]] = None) -> Dict[str, Any]:
         """
-        Core agentic loop — Gather → Plan → Act → Verify.
+        Core agentic loop — Manager-based multi-agent orchestration.
         
-        Inspired by Claude Code's autonomous execution pattern.
+        Manager analyzes task → Decomposes into sub-tasks → 
+        Dispatches to specialized agents → Aggregates results
+        
+        This replaces the single prompt loop with proper A2A multi-agent.
         """
         from project_kernel_runtime.cognition.llm_provider import LLMMessage
-        from .task_state_machine import TaskType, TaskStep
+        from .task_state_machine import TaskType, TaskStep, TaskStatus
 
-        # Create task
         task = self.tasks.create_task(
             type=TaskType.CUSTOM,
             description=task_description,
@@ -381,261 +386,370 @@ class Orchestrator:
         )
 
         session = self.sessions.get_session(session_id) if session_id else None
-        conversation = [
-            LLMMessage(role="system", content=self._build_system_prompt(session)),
-            LLMMessage(role="user", content=task_description),
-        ]
         
-        if session_id and hasattr(self.sessions, 'add_message_to_session'):
-            session = self.sessions.get_session(session_id)
-            last_message = session.conversation_messages[-1] if session and session.conversation_messages else None
-            if not last_message or last_message.get("role") != "user" or last_message.get("content") != task_description:
-                self.sessions.add_message_to_session(session_id, "user", task_description)
-
-        iteration = 0
-        results = []
-        consecutive_tool_failures = 0
+        # Get context
+        ctx = {
+            "workspace_path": session.workspace_path if session else ".",
+            "tools": self._session_allowed_builtin_tools(session, context_bindings),
+            "session_id": session_id,
+        }
         
-        # Loop detection: track recent tool call signatures
-        tool_call_history: List[str] = []
-        max_history = 5  # Keep last 5 tool calls
-        repetition_threshold = 3  # If same tool+args repeats 3 times, it's a loop
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Step 1: GATHER — Get LLM response with tool calling
-            # For simple conversational queries, don't provide tools to avoid loops
-            tools_for_llm = self._get_tool_schemas(session)
-            is_conversational = (
-                len(task_description.strip()) < 50 and
-                not any(keyword in task_description.lower() for keyword in [
-                    "file", "code", "write", "read", "edit", "create", "delete",
-                    "search", "find", "execute", "run", "command", "bash",
-                    "git", "commit", "push", "clone", "branch"
-                ])
+        # Use Manager for multi-agent execution
+        try:
+            from .manager import get_manager
+            manager = get_manager(self.llm, self.tool_executor, self.event_bus)
+            
+            result = await manager.execute(
+                task_description,
+                session_id=session_id,
+                context=ctx,
             )
-            if is_conversational and iteration == 1:
-                tools_for_llm = []  # Don't provide tools for simple greetings
-                
-            response = await self.llm.complete(
-                messages=conversation,
-                tools=tools_for_llm,
-                task_type="code_generation",
-            )
-            if not response.tool_calls:
-                if session_id and response.content and hasattr(self.sessions, 'add_message_to_session'):
-                    self.sessions.add_message_to_session(session_id, "assistant", response.content)
-                task.status = "completed"
+            
+            # Check result BEFORE completing - don't mark error as completed
+            if result.get("status") == "error":
+                task.status = TaskStatus.FAILED
+                task.error = result.get("response", result.get("error", "Unknown error"))
                 self.tasks.save_task(task)
-                await self.event_bus.emit_and_publish("task.completed", {
+                await self.event_bus.emit_and_publish("task.failed", {
                     "task_id": task.id,
-                    "iterations": iteration,
-                    "tool_calls": len(results),
+                    "error": task.error,
                 }, source="orchestrator")
                 return {
                     "task_id": task.id,
-                    "response": response.content,
-                    "tool_results": results,
-                    "iterations": iteration,
+                    "response": result.get("response", ""),
+                    "error": task.error,
+                    "mode": "manager_failed",
+                }
+            
+            task.status = TaskStatus.COMPLETED
+            if task.steps:
+                task.steps[0].result = result.get("response", "")
+            self.tasks.save_task(task)
+            
+            await self.event_bus.emit_and_publish("task.completed", {
+                "task_id": task.id,
+                "iterations": 1,
+                "mode": "manager",
+            }, source="orchestrator")
+            
+            return {
+                "task_id": task.id,
+                "response": result.get("response", ""),
+                "plan": result.get("plan", []),
+                "results": result.get("results", {}),
+                "mode": "manager",
+                "usage": self.llm.get_usage_stats(),
+            }
+            
+            # Add to session history so pollCore picks it up
+            if session_id and session:
+                self.sessions.add_message_to_session(session_id, "assistant", result.get("response", ""))
+            
+        except Exception as e:
+            logger.error(f"[Orchestrator] Manager failed: {e}")
+            # Real error handling - emit to UI, don't fallback
+            await self.event_bus.emit_and_publish("agent.error", {
+                "task_id": task.id,
+                "error": str(e),
+            }, source="orchestrator")
+            
+            # Return error - no fallback to single prompt
+            return {
+                "task_id": task.id,
+                "response": f"Agent error: {str(e)[:100]}",
+                "mode": "manager_failed",
+                "error": str(e),
+            }
+
+        # If we get here, something is wrong - shouldn't happen
+        return {"task_id": task.id, "response": "Unknown state", "mode": "error"}
+        
+        # ── Build conversation ──
+        sys_prompt = self._build_system_prompt(session)
+        if context_bindings:
+            folders = context_bindings.get("folders", [])
+            skills = context_bindings.get("skills", [])
+            mcp = context_bindings.get("mcp_servers", [])
+            if folders or skills or mcp:
+                sys_prompt += "\n\nAttached context: "
+                if folders: sys_prompt += f"Folders: {', '.join(folders)}. "
+                if skills: sys_prompt += f"Skills: {', '.join(skills)}. "
+                if mcp: sys_prompt += f"MCP: {', '.join(mcp)}."
+
+        conversation = [LLMMessage(role="system", content=sys_prompt)]
+        
+        # Inject chat history
+        if session and getattr(session, "conversation_messages", None):
+            for msg in session.conversation_messages:
+                if msg.get("role") == "user" and msg.get("content") == task_description:
+                    continue
+                content = msg.get("content")
+                if content:
+                    conversation.append(LLMMessage(role=msg.get("role", "user"), content=content))
+        
+        conversation.append(LLMMessage(role="user", content=task_description))
+        
+        if session_id and hasattr(self.sessions, 'add_message_to_session'):
+            last_msg = session.conversation_messages[-1] if session and session.conversation_messages else None
+            if not last_msg or last_msg.get("content") != task_description:
+                self.sessions.add_message_to_session(session_id, "user", task_description)
+
+        results = []
+        tools_for_llm = self._get_tool_schemas(session, context_bindings)
+
+        for iteration in range(max_iterations):
+            # Signal thinking
+            await self.event_bus.emit_and_publish("agent.thought", {
+                "task_id": task.id, "session_id": session_id,
+                "iteration": iteration + 1,
+                "content": f"Working on it (step {iteration + 1})..."
+            }, source="orchestrator")
+
+            response = await self.llm.complete(
+                messages=conversation,
+                tools=tools_for_llm if tools_for_llm else None,
+                task_type="code_generation",
+            )
+
+            # ── Fallback: parse tool calls from text (local LLM workaround) ──
+            if not response.tool_calls and tools_for_llm and response.content:
+                parsed = self._parse_tool_calls_from_text(
+                    response.content,
+                    [t.get("function", {}).get("name", "") for t in tools_for_llm]
+                )
+                if parsed:
+                    response.tool_calls = parsed
+                    response.content = ""
+
+            # ── No tool calls = agent is done talking ──
+            if not response.tool_calls:
+                answer = response.content or ""
+                if session_id and answer:
+                    self.sessions.add_message_to_session(session_id, "assistant", answer)
+                task.status = TaskStatus.COMPLETED
+                self.tasks.save_task(task)
+                await self.event_bus.emit_and_publish("task.completed", {
+                    "task_id": task.id, "iterations": iteration + 1, "tool_calls": len(results),
+                }, source="orchestrator")
+                return {
+                    "task_id": task.id, "response": answer,
+                    "tool_results": results, "iterations": iteration + 1,
                     "usage": self.llm.get_usage_stats(),
                 }
 
-            # Step 2: PLAN — Check if LLM wants to call tools
-            if response.tool_calls:
-                # First, add the assistant's message that contains the tool_calls
-                conversation.append(LLMMessage(
-                    role="assistant",
-                    content=response.content or "",
-                    tool_calls=response.tool_calls,
-                ))
-                
-                if session_id and response.content and hasattr(self.sessions, 'add_message_to_session'):
-                    self.sessions.add_message_to_session(session_id, "assistant", response.content)
+            # ── Execute tool calls ──
+            conversation.append(LLMMessage(
+                role="assistant", content=response.content or "",
+                tool_calls=response.tool_calls,
+            ))
+            
+            if session_id and response.content:
+                self.sessions.add_message_to_session(session_id, "assistant", response.content)
 
-                valid_tools_this_iteration = False
-                iteration_success = True
-
-                for tool_call in response.tool_calls:
-                    func = tool_call.get("function", {})
-                    tool_name = func.get("name", "").strip()
-                    
-                    # Skip empty tool names (model quirk)
-                    if not tool_name:
-                        logger.warning(f"[Orchestrator] Skipping empty tool name in tool_call: {tool_call}")
-                        continue
-                    
-                    valid_tools_this_iteration = True
-                    import json
-                    try:
-                        raw_args = func.get("arguments", "{}")
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-
-                    # Step 3: ACT — Execute tool via pipeline
-                    from .tool_executor import ToolCall as TC, ExecutionContext
-                    tc = TC(name=tool_name, arguments=args)
-                    allowed_builtin_tools = self._session_allowed_builtin_tools(session)
-                    enabled_features = ["skills", "llms"]
-                    if session and getattr(session, "mcp_servers", []):
-                        enabled_features.append("mcp")
-                    if session and getattr(session, "a2a_enabled", False):
-                        enabled_features.append("a2a")
-                    ctx = ExecutionContext(
-                        user_id=user_id,
-                        session_id=session_id or "default",
-                        execution_mode=self.config.mode if hasattr(self.config, 'mode') else "build",
-                        user_role=getattr(session, "user_role", getattr(self.config.governance, "default_role", "developer")) if session else getattr(self.config.governance, "default_role", "developer"),
-                        risk_mode=getattr(session, "risk_mode", "auto") if session else "auto",
-                        workspace_path=session.workspace_path if session else ".",
-                        enabled_features=enabled_features,
-                        enforce_skill_scope=session is not None,
-                        allowed_builtin_tools=allowed_builtin_tools,
-                        allowed_mcp_servers=getattr(session, "mcp_servers", []) if session else [],
-                        allowed_folders=getattr(session, "folders", []) if session else [],
-                    )
-                    result = await self.tool_executor.execute(tc, ctx)
-                    result_dict = {"tool_call_id": result.tool_call_id, "tool_name": result.tool_name, "success": result.success, "output": result.output, "error": result.error}
-                    results.append({"tool": tool_name, "result": result_dict})
-
-                    if not result.success:
-                        iteration_success = False
-
-                    # Feed result back to conversation
-                    conversation.append(LLMMessage(
-                        role="tool",
-                        content=str(result.output) if result.success else str(result.error),
-                        tool_call_id=tool_call.get("id", ""),
-                        name=tool_name,
-                    ))
-
-            if not iteration_success:
-                consecutive_tool_failures += 1
-            else:
-                consecutive_tool_failures = 0
-
-            # Loop detection: check if we're repeating the same tool calls
             for tool_call in response.tool_calls:
                 func = tool_call.get("function", {})
                 tool_name = func.get("name", "").strip()
-                if tool_name:
-                    raw_args = func.get("arguments", "{}")
-                    # Create a signature for this tool call
-                    tool_sig = f"{tool_name}:{raw_args}"
-                    tool_call_history.append(tool_sig)
-                    
-                    # Keep history bounded
-                    if len(tool_call_history) > max_history:
-                        tool_call_history.pop(0)
-            
-            # Check for repetition in recent history
-            from collections import Counter
-            if len(tool_call_history) >= repetition_threshold:
-                recent = tool_call_history[-repetition_threshold:]
-                if len(set(recent)) == 1:
-                    # Same tool call repeated threshold times - break the loop
-                    logger.warning(f"[Orchestrator] Detected tool loop: {recent[0]} repeated {repetition_threshold} times. Forcing exit.")
-                    task.status = "completed"
-                    self.tasks.save_task(task)
-                    return {
-                        "task_id": task.id,
-                        "response": "Hello! How can I assist you today?",
-                        "tool_results": results,
-                        "iterations": iteration,
-                        "usage": self.llm.get_usage_stats(),
-                    }
+                raw_args = func.get("arguments", "{}")
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
 
-            if consecutive_tool_failures >= 3:
-                logger.warning("[Orchestrator] Too many consecutive tool failures. Forcing exit.")
-                task.status = "failed"
-                self.tasks.save_task(task)
-                return {
-                    "task_id": task.id,
-                    "response": "Error: The agent got stuck failing to use tools correctly after 3 attempts.",
-                    "tool_results": results,
-                    "iterations": iteration,
-                    "usage": self.llm.get_usage_stats(),
-                }
+                if not tool_name:
+                    continue
 
-            # If tool_calls existed but ALL were skipped (empty names),
-            # treat as text response and return content
-            if not valid_tools_this_iteration:
-                if response.content:
-                    if session_id and hasattr(self.sessions, 'add_message_to_session'):
-                        self.sessions.add_message_to_session(session_id, "assistant", response.content)
-                    task.status = "completed"
-                    self.tasks.save_task(task)
-                    return {
-                        "task_id": task.id,
-                        "response": response.content,
-                        "tool_results": results,
-                        "iterations": iteration,
-                        "usage": self.llm.get_usage_stats(),
-                    }
+                # Signal executing
+                await self.event_bus.emit_and_publish("tool.executing", {
+                    "task_id": task.id, "session_id": session_id,
+                    "tool_name": tool_name, "arguments": args
+                }, source="orchestrator")
+
+                from .tool_executor import ToolCall as TC, ExecutionContext
+                tc = TC(name=tool_name, arguments=args)
+                
+                # Get session-scoped permissions - MUST pass context_bindings
+                allowed_tools = self._session_allowed_builtin_tools(session, context_bindings)
+                allowed_folders = getattr(session, "folders", []) or []
+                allowed_mcp = getattr(session, "mcp_servers", []) or []
+                
+                ctx = ExecutionContext(
+                    user_id=user_id,
+                    session_id=session_id or "default",
+                    workspace_path=session.workspace_path if session else ".",
+                    enabled_features=["skills", "llms", "mcp", "a2a"],
+                    enforce_skill_scope=True,  # Force skill scoping
+                    allowed_builtin_tools=allowed_tools,
+                    allowed_mcp_servers=allowed_mcp,
+                    allowed_folders=allowed_folders,
+                )
+
+                result = await self.tool_executor.execute(tc, ctx)
+                results.append({
+                    "tool": tool_name,
+                    "result": {"success": result.success, "output": result.output, "error": result.error}
+                })
+
+                # ── Tool result with system reminder (Claude Code pattern) ──
+                if result.success:
+                    tool_output = str(result.output)[:4000] if result.output else "Done."
+                    tool_output += f"\n\n[Reminder: You are working in {(session.workspace_path if session else '.')}. Continue with the next step or respond to the user if done.]"
                 else:
-                    # Model hallucinated empty tool calls AND empty text.
-                    # Inject a system prompt to correct it.
-                    logger.warning("[Orchestrator] LLM returned empty tool calls and empty text. Injecting correction.")
-                    conversation.append(LLMMessage(
-                        role="user",
-                        content="Error: You provided an empty tool call or empty text. Please respond with text or a valid tool call."
-                    ))
+                    tool_output = f"Error: {result.error}\n\n[Try a different approach or tell the user what went wrong.]"
 
-            # Step 4: VERIFY — Check for stop conditions
-            if iteration >= max_iterations:
-                break
+                conversation.append(LLMMessage(
+                    role="tool", content=tool_output,
+                    tool_call_id=tool_call.get("id", ""), name=tool_name,
+                ))
 
-        # Exceeded max iterations
+        # Max iterations reached
+        task.status = TaskStatus.COMPLETED
+        self.tasks.save_task(task)
         return {
             "task_id": task.id,
-            "response": "[Max iterations reached]",
-            "tool_results": results,
-            "iterations": iteration,
+            "response": "[Completed the task after reaching the step limit.]",
+            "tool_results": results, "iterations": max_iterations,
+            "usage": self.llm.get_usage_stats(),
         }
 
-    def _build_system_prompt(self, session=None) -> str:
-        """Build system prompt with project context."""
-        constraints = ""
-        if session:
-            constraints = (
-                f"\n\nSession governance:"
-                f"\n- role: {getattr(session, 'user_role', 'developer')}"
-                f"\n- risk mode: {getattr(session, 'risk_mode', 'auto')}"
-                f"\n- allowed skills: {', '.join(getattr(session, 'skills', [])) or 'none'}"
-                f"\n- bound MCP servers: {', '.join(getattr(session, 'mcp_servers', [])) or 'none'}"
-                f"\n- allowed folders: {', '.join(getattr(session, 'folders', [])) or session.workspace_path}"
-            )
-        return (
-            "You are an autonomous coding agent. You have access to tools for "
-            "reading/writing files, executing commands, searching the web, and "
-            "managing git. Plan your approach, execute it step by step, and verify "
-            "the results. Be thorough and precise."
-            "\n\nIMPORTANT: Only use tools when they are necessary for the task. "
-            "For simple greetings, questions, or conversation, respond directly "
-            "without invoking any tools. Only use tools when you need to: "
-            "read/write files, execute commands, search the web, or manage git "
-            "repositories. If a task can be answered with a simple text response, "
-            "do not use tools."
-            + constraints
-        )
-
-    def _session_allowed_builtin_tools(self, session) -> List[str]:
-        if not session or not getattr(session, "skills", None):
-            return []
-        tools: List[str] = []
-        for skill_name in session.skills:
+    @staticmethod
+    def _parse_tool_calls_from_text(text: str, available_tools: List[str]) -> Optional[List[Dict]]:
+        """Parse tool calls from raw text when the LLM returns JSON instead of using function-calling API.
+        
+        Handles formats like:
+        - {"function": "read_file", "parameters": {"path": "test.txt"}}
+        - {"name": "list_directory", "arguments": {"path": "."}}
+        - [{"function": "search_files", "parameters": {...}}]
+        - Multiple JSON objects in text
+        """
+        import json
+        import uuid
+        
+        if not text or not available_tools:
+            return None
+        
+        tool_calls = []
+        
+        # Try to find JSON objects/arrays in the text
+        # Strategy 1: Try parsing the entire text as JSON (single call or array)
+        for candidate in [text.strip(), text.strip().rstrip('.!?')]:
             try:
-                tools.extend(self.skills.get_tools_for_skill(skill_name))
+                parsed = json.loads(candidate)
+                items = parsed if isinstance(parsed, list) else [parsed]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    # Detect function name from various key names
+                    func_name = (
+                        item.get("function") or item.get("name") or 
+                        item.get("tool") or item.get("tool_name") or ""
+                    )
+                    # Detect arguments from various key names
+                    args = (
+                        item.get("parameters") or item.get("arguments") or 
+                        item.get("args") or item.get("input") or {}
+                    )
+                    if func_name and func_name in available_tools:
+                        tool_calls.append({
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "function",
+                            "function": {
+                                "name": func_name,
+                                "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                            }
+                        })
+                if tool_calls:
+                    return tool_calls
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Strategy 2: Find JSON objects embedded in text using regex
+        json_pattern = re.compile(r'\{[^{}]*"?(?:function|name|tool|tool_name)"?\s*:\s*"[^"]+"[^{}]*\}', re.DOTALL)
+        matches = json_pattern.findall(text)
+        for match in matches:
+            try:
+                parsed = json.loads(match)
+                func_name = (
+                    parsed.get("function") or parsed.get("name") or
+                    parsed.get("tool") or parsed.get("tool_name") or ""
+                )
+                args = (
+                    parsed.get("parameters") or parsed.get("arguments") or
+                    parsed.get("args") or parsed.get("input") or {}
+                )
+                if func_name and func_name in available_tools:
+                    tool_calls.append({
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": func_name,
+                            "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                        }
+                    })
+            except (json.JSONDecodeError, TypeError):
+                continue
+        
+        return tool_calls if tool_calls else None
+
+
+    def _build_system_prompt(self, session=None) -> str:
+        """Short system prompt — Claude Code style. Let the model do the work."""
+        workspace = session.workspace_path if session else "."
+        folders = ', '.join(getattr(session, 'folders', [])) if session else ""
+        
+        prompt = (
+            f"You are an AI coding assistant. Workspace: {workspace}\n"
+            f"Rules:\n"
+            f"- Use your tools to read, write, and execute. Don't just explain.\n"
+            f"- For file questions, use list_directory or read_file immediately.\n"
+            f"- For web questions, use web_search.\n"
+            f"- Chain tool calls when needed. Be concise.\n"
+            f"- You only have access to tools you've been given access to."
+        )
+        if folders:
+            prompt += f"\nBound folders: {folders}"
+        
+        # Add available tools to prompt so model knows
+        tools = self._session_allowed_builtin_tools(session)
+        prompt += f"\nAvailable tools: {', '.join(tools)}"
+        return prompt
+
+    def _session_allowed_builtin_tools(self, session, context_bindings: Dict = None) -> List[str]:
+        """Return tools available to a session.
+        
+        Zero-trust: by default NO tools. User attaches skills to session.
+        Only then those tools become available.
+        
+        Args:
+            session: Session object with skills attribute
+            context_bindings: Optional dict with skills list from request payload
+        """
+        # No session and no context = no tools
+        session_skills = getattr(session, "skills", []) or [] if session else []
+        cb_skills = (context_bindings.get("skills", []) if context_bindings else [])
+        
+        # Combine session skills + context binding skills
+        all_skills = list(dict.fromkeys(session_skills + cb_skills))
+        
+        if not all_skills:
+            return []
+        
+        # Get tools from skills
+        tools = []
+        for skill_name in all_skills:
+            try:
+                skill_tools = self.skills.get_tools_for_skill(skill_name)
+                if skill_tools:
+                    tools.extend(skill_tools)
             except Exception:
                 continue
-        return list(dict.fromkeys(tool for tool in tools if tool))
-
-    def _get_tool_schemas(self, session=None) -> List[Dict]:
+        
+        return list(dict.fromkeys(tools)) if tools else []
+    
+    def _get_tool_schemas(self, session=None, context_bindings: Dict = None) -> List[Dict]:
         """Get tool schemas for LLM function calling, including external MCP tools."""
         from .universal_tools import get_all_tools
         tools = get_all_tools()
-        allowed_builtin = set(self._session_allowed_builtin_tools(session))
+        allowed_builtin = set(self._session_allowed_builtin_tools(session, context_bindings))
         if session is not None:
             tools = [tool for tool in tools if tool.name in allowed_builtin]
         schemas = [

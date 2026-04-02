@@ -127,11 +127,12 @@ class AgentSwarm:
     - Result aggregation
     """
     
-    def __init__(self, swarm_id: str = None, llm_provider=None, event_bus=None):
+    def __init__(self, swarm_id: str = None, llm_provider=None, event_bus=None, tool_executor=None):
         self.swarm_id = swarm_id or f"swarm_{uuid4().hex[:8]}"
         self.agents: List[SwarmAgent] = [SwarmAgent(**a.__dict__) for a in DEFAULT_AGENTS]
         self.llm_provider = llm_provider
         self.event_bus = event_bus
+        self.tool_executor = tool_executor
         self.active_tasks: Dict[str, SubTask] = {}
         self._task_history: List[SwarmResult] = []
         logger.info(f"[Swarm:{self.swarm_id}] Initialized with {len(self.agents)} agents")
@@ -281,17 +282,147 @@ class AgentSwarm:
         
         return subtasks
     
-    async def _execute_subtask(self, subtask: SubTask) -> str:
-        """Execute a single subtask (placeholder for real LLM-driven execution)."""
+    async def _execute_subtask(self, subtask: SubTask,
+                                context: Dict[str, Any] = None) -> str:
+        """Execute a subtask using a role-specific LLM loop with tools."""
         subtask.status = "running"
+        agent_name = subtask.assigned_agent or "Agent"
+        agent_role = subtask.required_role
+        ctx = context or {}
         
-        # Real execution would use LLM + tools here
-        # For now return a structured description of what would happen
-        agent = subtask.assigned_agent or "Unassigned"
-        return (
-            f"[{agent}] Executed: {subtask.description} "
-            f"(role={subtask.required_role.value}, skills={subtask.required_skills})"
-        )
+        if self.event_bus:
+            try:
+                await self.event_bus.emit_and_publish("agent.thought", {
+                    "content": f"[{agent_name}] Working on: {subtask.description[:100]}"
+                }, source=f"swarm:{agent_name}")
+            except Exception:
+                pass
+        
+        # If no LLM provider, return structured acknowledgment
+        if not self.llm_provider:
+            subtask.status = "completed"
+            return f"[{agent_name}] {subtask.description} (no LLM available — acknowledged)"
+        
+        # Build role-specific system prompt
+        role_prompts = {
+            AgentRole.ARCHITECT: (
+                "You are a Software Architect agent. Your job is to analyze requirements, "
+                "design solutions, and create implementation plans. Use read_file and search_files "
+                "to understand the codebase before making recommendations. "
+                "Respond with a clear, actionable plan."
+            ),
+            AgentRole.CODER: (
+                "You are a Coder agent. Your job is to implement changes — write files, edit code, "
+                "and execute commands. Be precise and make only the changes requested. "
+                "Use write_file and edit_file tools to implement. Use bash_execute to verify."
+            ),
+            AgentRole.REVIEWER: (
+                "You are a Code Reviewer agent. Your job is to review code for bugs, "
+                "security issues, and style problems. Use read_file and git_diff to examine code. "
+                "Respond with specific findings and suggestions."
+            ),
+            AgentRole.TESTER: (
+                "You are a Tester agent. Your job is to write and run tests. "
+                "Use read_file to understand what needs testing, write_file to create tests, "
+                "and bash_execute to run them. Report pass/fail results."
+            ),
+            AgentRole.RESEARCHER: (
+                "You are a Researcher agent. Your job is to gather information from the web "
+                "and codebase. Use web_search and web_fetch to find information. "
+                "Use read_file to examine local code. Respond with findings and sources."
+            ),
+        }
+        
+        from project_kernel_runtime.cognition.llm_provider import LLMMessage
+        import json
+        
+        sys_prompt = role_prompts.get(agent_role, "You are a helpful coding assistant. Use tools to complete tasks.")
+        workspace = ctx.get("workspace_path", ".")
+        sys_prompt += f"\n\nWorkspace: {workspace}"
+        
+        conversation = [
+            LLMMessage(role="system", content=sys_prompt),
+            LLMMessage(role="user", content=subtask.description),
+        ]
+        
+        # Build tool schemas for this subtask (only tools the agent role needs)
+        tools_for_agent = []
+        if self.tool_executor:
+            all_schemas = []
+            for tname in subtask.required_skills:
+                tool = self.tool_executor.get_tool(tname)
+                if tool:
+                    all_schemas.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        }
+                    })
+            tools_for_agent = all_schemas
+        
+        # Run a mini agentic loop (max 5 iterations per subtask)
+        result_text = ""
+        for iteration in range(5):
+            try:
+                response = await self.llm_provider.complete(
+                    messages=conversation,
+                    tools=tools_for_agent if tools_for_agent else None,
+                    task_type="code_generation",
+                )
+            except Exception as e:
+                result_text = f"LLM error: {str(e)}"
+                break
+            
+            # If no tool calls, we have the final answer
+            if not response.tool_calls:
+                result_text = response.content or "(no response)"
+                break
+            
+            # Execute tool calls
+            conversation.append(LLMMessage(
+                role="assistant",
+                content=response.content or "",
+                tool_calls=response.tool_calls,
+            ))
+            
+            for tc in response.tool_calls:
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                raw_args = func.get("arguments", "{}")
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                
+                if self.tool_executor and tool_name:
+                    from .tool_executor import ToolCall as TC, ExecutionContext
+                    exec_ctx = ExecutionContext(
+                        user_id="swarm",
+                        session_id=ctx.get("session_id", "swarm"),
+                        workspace_path=workspace,
+                        enabled_features=["skills", "llms"],
+                        enforce_skill_scope=False,
+                    )
+                    tool_result = await self.tool_executor.execute(
+                        TC(name=tool_name, arguments=args), exec_ctx
+                    )
+                    output = str(tool_result.output) if tool_result.success else str(tool_result.error)
+                else:
+                    output = f"Tool '{tool_name}' not available"
+                
+                conversation.append(LLMMessage(
+                    role="tool",
+                    content=output[:2000],
+                    tool_call_id=tc.get("id", ""),
+                    name=tool_name,
+                ))
+            
+            result_text = response.content or "Tools executed"
+        
+        subtask.status = "completed"
+        return f"[{agent_name}] {result_text}"
     
     def _find_best_agent(self, subtask: SubTask) -> Optional[SwarmAgent]:
         """Find the best idle agent for a subtask."""

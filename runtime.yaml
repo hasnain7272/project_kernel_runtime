@@ -57,29 +57,7 @@ mcp:
   resources_enabled: true
   prompts_enabled: true
   sampling_enabled: false
-mcpServers:
-  filesystem-mcp:
-    command: python
-    args:
-    - -m
-    - mcp_server_filesystem
-    disabled: false
-    auto_start: false
-  websearch-mcp:
-    command: node
-    args:
-    - websearch-server.js
-    disabled: false
-    auto_start: false
-  filesystem-access:
-    command: npx
-    args:
-    - -y
-    - '@modelcontextprotocol/server-filesystem'
-    - ./workspace
-    disabled: false
-    auto_start: true
-    env: {}
+mcpServers: null
 sandbox:
   backend: subprocess
   docker_image: python:3.11-slim
@@ -147,7 +125,7 @@ skills:
   - file_operations
   - terminal_execution
   - git_operations
-  - mcp_client
+  - web_operations
   - lsp_integration
   domain: []
   auto_discover: true
@@ -179,3 +157,7 @@ workspace_adapters:
 - git_worktree
 - containerized
 data_dir: ./data
+project_registry:
+  folders:
+  - ./workspace
+  - D:\AI_Content_Studio\ai_blender_cinematic\antigravity\session_test_folder1

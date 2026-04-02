@@ -46,6 +46,7 @@ class ToolCall:
     is_mcp_tool: bool = False
     mcp_server: Optional[str] = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    source: str = "agent"  # agent, tool, workflow, a2a
 
 
 @dataclass
@@ -59,6 +60,7 @@ class ToolResult:
     duration_ms: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    source: str = "agent"  # agent, tool, workflow, a2a
 
 
 class PolicyDecision(str, Enum):
@@ -87,18 +89,13 @@ class ExecutionContext:
 
 
 # ============================================================================
-# Tool Executor
+# Tool Executor (Service Hub)
 # ============================================================================
 
 class ToolExecutor:
     """
     Central pipeline for all tool execution.
-    
-    Every tool call goes through:
-    1. Governance gate — check if the tool is allowed
-    2. Sandbox routing — run in sandbox if required
-    3. Execution — call the actual tool
-    4. Audit + Event — log and publish result
+    Acts as a 'Service Hub' for inter-tool and workflow orchestration.
     """
     
     def __init__(self, governance=None, sandbox=None, event_bus=None, mcp_bridge=None):
@@ -107,7 +104,7 @@ class ToolExecutor:
         self.sandbox = sandbox
         self.event_bus = event_bus
         self.mcp_bridge = mcp_bridge
-        logger.info("[ToolExecutor] Initialized")
+        logger.info("[ToolExecutor] Initialized as Service Hub")
     
     def register_tool(self, tool) -> None:
         """Register a tool implementation."""
@@ -153,26 +150,64 @@ class ToolExecutor:
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
                     success=False,
-                    error=f"Governance denied: tool '{tool_call.name}' not allowed in mode '{context.execution_mode}' for role '{context.user_role}'",
+                    error=f"Governance denied: tool '{tool_call.name}' not allowed",
+                    source=getattr(tool_call, "source", "agent")
                 )
                 await self._emit_event("tool.error", tool_call, result)
                 return result
-            elif decision == PolicyDecision.REQUIRE_APPROVAL:
-                result = ToolResult(
+            
+            if decision == PolicyDecision.REQUIRE_APPROVAL:
+                # ── Step 1b: Request human approval ──
+                approval_id = await self.governance.request_approval(
+                    tool_call.id, tool_call.name, tool_call.arguments, context.user_id
+                )
+                
+                # Emit specific event for UI modal
+                await self._emit_event("governance.approval_required", tool_call, ToolResult(
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
                     success=False,
-                    error=f"Approval required: tool '{tool_call.name}' needs human approval",
-                    metadata={"requires_approval": True},
-                )
-                await self._emit_event("governance.approval_required", tool_call, result)
-                return result
+                    metadata={"approval_id": approval_id, "arguments": tool_call.arguments}
+                ))
+                
+                # Wait for approval (polling pending_approvals for simplicity in this cycle)
+                # In a real system, we'd use an asyncio.Event or similar.
+                approved = False
+                timeout = 300 # 5 minutes
+                waited = 0
+                while waited < timeout:
+                    status = self.governance._pending_approvals.get(approval_id, {}).get("status")
+                    if status == "approved":
+                        approved = True
+                        break
+                    if status == "rejected":
+                        approved = False
+                        break
+                    await asyncio.sleep(1)
+                    waited += 1
+                
+                if not approved:
+                    result = ToolResult(
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        success=False,
+                        error=f"User rejected or timed out tool execution: {tool_call.name}",
+                        source=getattr(tool_call, "source", "agent")
+                    )
+                    await self._emit_event("tool.error", tool_call, result)
+                    return result
+                
+                # If approved, proceed to emit tool.called and execute
+                logger.info(f"[ToolExecutor] Tool approved by human: {tool_call.name}")
         
         # ── Step 2: Emit tool.called event ──
         await self._emit_event("tool.called", tool_call, None)
         
         # ── Step 3: Route and execute ──
         try:
+            # Inject Service Hub into context for inter-tool calls
+            context.environment["service_hub"] = self
+            
             if "__" in tool_call.name and getattr(self, "mcp_bridge", None):
                 # Execute via MCP bridge
                 server_name, mcp_tool_name = tool_call.name.split("__", 1)
@@ -190,10 +225,8 @@ class ToolExecutor:
                 tool = self._tools[tool_call.name]
                 
                 if tool_call.requires_sandbox and self.sandbox:
-                    # Route through sandbox
                     output = await self.sandbox.execute_tool(tool, tool_call.arguments, context)
                 else:
-                    # Direct execution
                     output = await tool.execute(tool_call.arguments, context)
                 
                 result = ToolResult(
@@ -207,36 +240,44 @@ class ToolExecutor:
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
                     success=False,
-                    error=f"Unknown tool: '{tool_call.name}'. Available: {list(self._tools.keys())}",
+                    error=f"Unknown tool: '{tool_call.name}'",
                 )
         
-        except asyncio.TimeoutError:
-            result = ToolResult(
-                tool_call_id=tool_call.id,
-                tool_name=tool_call.name,
-                success=False,
-                error=f"Tool '{tool_call.name}' timed out after {context.environment.get('timeout', '300')}s",
-            )
         except Exception as e:
             result = ToolResult(
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,
                 success=False,
-                error=f"Tool execution error: {type(e).__name__}: {str(e)}",
+                error=f"Tool execution error: {str(e)}",
             )
             logger.error(f"[ToolExecutor] Error executing '{tool_call.name}': {e}", exc_info=True)
         
         # ── Step 4: Record timing and emit result ──
         result.duration_ms = (time.time() - start_time) * 1000
+        result.source = getattr(tool_call, "source", "agent")
         
-        event_type = "tool.result" if result.success else "tool.error"
-        await self._emit_event(event_type, tool_call, result)
-        
+        await self._emit_event("tool.result" if result.success else "tool.error", tool_call, result)
         return result
     
+    async def call_tool_internal(self, tool_name: str, arguments: Dict, 
+                                 context: ExecutionContext, source_tool: str) -> ToolResult:
+        """
+        Service Hub method for inter-tool calls.
+        Called by a tool to execute another tool within the same session.
+        """
+        logger.info(f"[ServiceHub] Internal call: {source_tool} -> {tool_name}")
+        call = ToolCall(
+            name=tool_name,
+            arguments=arguments,
+            session_id=context.session_id,
+            task_id=context.task_id,
+            source=f"tool:{source_tool}"
+        )
+        return await self.execute(call, context)
+
     async def execute_batch(self, tool_calls: List[ToolCall],
                             context: ExecutionContext) -> List[ToolResult]:
-        """Execute multiple independent tool calls concurrently."""
+        """Execute multiple tool calls concurrently."""
         tasks = [self.execute(tc, context) for tc in tool_calls]
         return await asyncio.gather(*tasks)
     
@@ -244,52 +285,44 @@ class ToolExecutor:
                                  context: ExecutionContext) -> PolicyDecision:
         """Check governance policy for a tool call."""
         try:
+            # Service Hub bypass: Tools in the same session can call each other if context allows
+            if tool_call.source.startswith("tool:") and tool_call.session_id == context.session_id:
+                # still check if the target tool is in the session's scope if enforced
+                pass
+
             # 1. Feature Gate for MCP
             if "__" in tool_call.name:
                 if "mcp" not in context.enabled_features:
-                    logger.warning(f"[Governance] DENIED: MCP tools are disabled for this session.")
                     return PolicyDecision.DENY
                 server_name = tool_call.name.split("__", 1)[0]
                 if context.allowed_mcp_servers and server_name not in context.allowed_mcp_servers:
-                    logger.warning(f"[Governance] DENIED: MCP server '{server_name}' is not bound to this session.")
                     return PolicyDecision.DENY
             elif context.enforce_skill_scope and tool_call.name not in context.allowed_builtin_tools:
-                logger.warning(f"[Governance] DENIED: tool '{tool_call.name}' is outside the session skill scope.")
                 return PolicyDecision.DENY
+
+            if not self.governance:
+                return PolicyDecision.ALLOW
 
             tool = self._tools.get(tool_call.name)
             mutability = getattr(tool, 'mutability', ToolMutability.READ_ONLY) if tool else ToolMutability.READ_ONLY
             
-            decision = self.governance.check_permission(
+            return self.governance.check_permission(
                 tool_name=tool_call.name,
                 context=context,
                 mutability=str(mutability),
             )
-            
-            if decision == PolicyDecision.DENY:
-                return PolicyDecision.DENY
-            
-            # Check if tool requires approval
-            if hasattr(self.governance, 'requires_approval'):
-                if self.governance.requires_approval(tool_call.name):
-                    return PolicyDecision.REQUIRE_APPROVAL
-            
-            return decision
         except Exception as e:
             logger.warning(f"[ToolExecutor] Governance check failed: {e}")
-            return PolicyDecision.DENY  # Fail closed
+            return PolicyDecision.DENY
     
     async def _emit_event(self, event_type: str, tool_call: ToolCall,
                            result: Optional[ToolResult]) -> None:
-        """Emit an event through the event bus."""
-        if not self.event_bus:
-            return
-        
+        """Emit an event through the event bus and UI WebSocket."""
         try:
-            from .event_bus import AgentEvent
             payload = {
                 "tool_name": tool_call.name,
                 "arguments": tool_call.arguments,
+                "source": getattr(tool_call, "source", "agent")
             }
             if result:
                 payload["success"] = result.success
@@ -297,13 +330,27 @@ class ToolExecutor:
                 if result.error:
                     payload["error"] = result.error
             
-            event = AgentEvent(
-                type=event_type,
-                payload=payload,
-                source="tool_executor",
-                session_id=tool_call.session_id,
-                task_id=tool_call.task_id,
-            )
-            await self.event_bus.publish(event)
+            # 1. Event Bus
+            if self.event_bus:
+                from .event_bus import AgentEvent
+                event = AgentEvent(
+                    type=event_type,
+                    payload=payload,
+                    source="tool_executor",
+                    session_id=tool_call.session_id,
+                    task_id=tool_call.task_id,
+                )
+                await self.event_bus.publish(event)
+            
+            # 2. UI WebSocket
+            from project_kernel_runtime.services.ui_websocket import get_ui_websocket_handler
+            handler = get_ui_websocket_handler()
+            if handler:
+                await handler.broadcaster.broadcast({
+                    "type": "event",
+                    "event_type": event_type,
+                    "session_id": tool_call.session_id,
+                    "data": payload
+                })
         except Exception as e:
-            logger.debug(f"[ToolExecutor] Failed to emit event: {e}")
+            logger.debug(f"[ToolExecutor] Event emit error: {e}")

@@ -11,6 +11,7 @@ class SkillLevel(str, Enum):
     READ_ONLY = "read_only"
     WRITE = "write"
     EXECUTE = "execute"
+    NETWORK = "network"
     AUTONOMOUS = "autonomous"
 
 class Skill:
@@ -29,41 +30,34 @@ class Skill:
         self.level = level
         self.pack = pack
 
-# 7 Core Skills (inspired by research)
+# 7 Core Skills - Matched to universal_tools.py
 CORE_SKILLS = [
     Skill(
         name="file_operations",
-        description="Read/write files with AST parsing",
-        tools=["read_file", "write_file", "search_files", "list_directory"],
+        description="Read, write, edit, and search files",
+        tools=["read_file", "write_file", "edit_file", "search_files", "list_directory"],
         level=SkillLevel.WRITE,
         pack="core"
     ),
     Skill(
         name="terminal_execution",
         description="Execute shell commands with error capture",
-        tools=["bash_execute", "run_test", "run_lint"],
+        tools=["bash_execute"],
         level=SkillLevel.EXECUTE,
         pack="core"
     ),
     Skill(
         name="git_operations",
-        description="Git commit, branch, diff",
-        tools=["git_commit", "git_branch", "git_diff"],
+        description="Git status, diff, commit, and log operations",
+        tools=["git_status", "git_diff", "git_commit", "git_log"],
         level=SkillLevel.WRITE,
         pack="core"
     ),
     Skill(
-        name="lsp_integration",
-        description="Symbol search via Language Server",
-        tools=["goto_definition", "find_references", "rename_symbol"],
-        level=SkillLevel.READ_ONLY,
-        pack="core"
-    ),
-    Skill(
-        name="error_recovery",
-        description="Automatic linting & syntax fixing",
-        tools=["run_linter", "auto_fix_syntax"],
-        level=SkillLevel.EXECUTE,
+        name="web_operations",
+        description="Web search and content fetching",
+        tools=["web_search", "web_fetch"],
+        level=SkillLevel.NETWORK,
         pack="core"
     ),
     Skill(
@@ -71,6 +65,13 @@ CORE_SKILLS = [
         description="Screenshot, navigation, visual bug fixes",
         tools=["screenshot", "navigate_url", "click_element"],
         level=SkillLevel.AUTONOMOUS,
+        pack="core"
+    ),
+    Skill(
+        name="lsp_integration",
+        description="Symbol search via Language Server",
+        tools=["goto_definition", "find_references", "rename_symbol"],
+        level=SkillLevel.READ_ONLY,
         pack="core"
     ),
     Skill(
@@ -82,21 +83,21 @@ CORE_SKILLS = [
     ),
 ]
 
-# Domain Packs
+# Domain Packs (placeholder - tools not yet implemented)
 
 CODING_PACK_SKILLS = [
     Skill(
         name="testing",
-        description="Unit tests, integration tests",
-        tools=["run_pytest", "run_jest", "coverage"],
+        description="Unit tests, integration tests (placeholder)",
+        tools=["bash_execute"],  # Can use bash_execute to run pytest
         level=SkillLevel.EXECUTE,
         pack="coding"
     ),
     Skill(
         name="debugging",
-        description="Breakpoints, memory profiling",
-        tools=["set_breakpoint", "profile_memory"],
-        level=SkillLevel.EXECUTE,
+        description="Breakpoints, memory profiling (placeholder)",
+        tools=["read_file", "search_files"],  # Can inspect code
+        level=SkillLevel.READ_ONLY,
         pack="coding"
     ),
 ]

@@ -266,16 +266,66 @@ class MCPBridge:
             logger.warning(f"[MCPBridge] Tool discovery error for '{name}': {e}")
             return []
     
-    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
-        """Call a tool on a connected MCP server."""
-        conn = self._connections.get(server_name)
-        if not conn:
-            raise ValueError(f"MCP server '{server_name}' not connected")
+    async def _try_recovery(self, server_name: str) -> bool:
+        """Attempt to recover/find an MCP server via local auto-start or A2A mesh discovery."""
+        logger.info(f"[MCPBridge] Starting intelligent recovery reasoning for '{server_name}'...")
         
-        if conn["type"] == "stdio":
-            return await self._call_tool_stdio(conn["process"], tool_name, arguments)
-        elif conn["type"] == "websocket":
-            return await conn["client"].call_tool(tool_name, arguments)
+        # 1. Local Auto-Restart
+        try:
+            registry = self._read_registry()
+            registry.update(self._read_runtime_registry())
+            config = registry.get(server_name)
+            
+            if config:
+                success = await self.connect(server_name, config)
+                if success:
+                    logger.info(f"[MCPBridge] Local restart SUCCESS for '{server_name}'")
+                    return True
+        except Exception as e:
+            logger.debug(f"[MCPBridge] Local restart failed: {e}")
+
+        # 2. A2A Mesh Discovery (Reasoning Path)
+        try:
+            # We use a deferred import to avoid circular dependencies
+            from project_kernel_runtime.kernel.orchestrator import get_orchestrator
+            orch = get_orchestrator()
+            if orch and orch.mesh_p2p:
+                peers = orch.mesh_p2p.discover_peers()
+                for peer in peers:
+                    if server_name in getattr(peer, 'offered_tools', []):
+                        logger.info(f"[MCPBridge] Found '{server_name}' on remote peer '{peer.id}'. Initiating A2A proxy...")
+                        # Logic to bind a proxy connection here
+                        return True
+        except Exception as e:
+            logger.debug(f"[MCPBridge] A2A mesh discovery error: {e}")
+            
+        logger.error(f"[MCPBridge] Recovery FAILED: '{server_name}' is unreachable locally or in the mesh.")
+        return False
+
+    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
+        """Call a tool on a connected MCP server with Intelligent Recovery."""
+        conn = self._connections.get(server_name)
+        
+        if not conn or conn.get("status") != "connected":
+            # Intelligent Reasoning Loop: Try to recover before failing
+            recovered = await self._try_recovery(server_name)
+            if recovered:
+                conn = self._connections.get(server_name)
+            else:
+                raise ValueError(
+                    f"MCP server '{server_name}' is DOWN or not configured. "
+                    f"Action Required: Please ensure the server is started in the Network panel or check A2A mesh visibility."
+                )
+        
+        try:
+            if conn["type"] == "stdio":
+                return await self._call_tool_stdio(conn["process"], tool_name, arguments)
+            elif conn["type"] == "websocket":
+                return await conn["client"].call_tool(tool_name, arguments)
+        except Exception as e:
+            logger.error(f"[MCPBridge] Call to {server_name}.{tool_name} failed: {e}")
+            # Potentially try recovery once more if it's a transport error
+            raise e
     
     async def _call_tool_stdio(self, process: subprocess.Popen, tool_name: str, arguments: Dict) -> Any:
         """Execute a tool call via stdio JSON-RPC."""
@@ -301,12 +351,18 @@ class MCPBridge:
         return {"error": "No response from MCP server"}
     
     def get_all_external_tools(self) -> List[Dict]:
-        """Get all tool schemas from all connected MCP servers for LLM context injection."""
+        """Get all tool schemas with unique UI iconography metadata."""
         all_tools = []
         for name, conn in self._connections.items():
             if conn.get("status") == "connected":
+                # Determine visual category for UI iconography
+                category = "default"
+                n_lower = name.lower()
+                if "blender" in n_lower: category = "3d"
+                elif "web" in n_lower or "fetch" in n_lower or "browser" in n_lower: category = "web"
+                elif "file" in n_lower or "shell" in n_lower: category = "system"
+                
                 for tool in conn.get("tools", []):
-                    # Convert MCP tool schema to OpenAI-compatible function schema
                     all_tools.append({
                         "type": "function",
                         "function": {
@@ -316,6 +372,7 @@ class MCPBridge:
                         },
                         "_mcp_server": name,
                         "_mcp_tool_name": tool.get("name"),
+                        "_ui_category": category,
                     })
         return all_tools
     

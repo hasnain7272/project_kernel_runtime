@@ -76,21 +76,67 @@ def _resolve_workspace_path(path: Optional[str]) -> Path:
     return candidate
 
 
-@router.get("/api/project/registry")
+@router.get("/health")
+async def health_check():
+    try:
+        from project_kernel_runtime.services.fastapi_server import orchestrator
+    except Exception:
+        orchestrator = None
+    return {"status": "healthy" if orchestrator else "initializing"}
+
+
+@router.get("/status/full")
+async def get_full_status():
+    try:
+        from project_kernel_runtime.services.fastapi_server import orchestrator
+    except Exception:
+        orchestrator = None
+    if not orchestrator:
+        return {"status": "initializing"}
+    return {
+        "status": "online",
+        "active_sessions": len(orchestrator.active_sessions),
+        "tasks_running": len(orchestrator.running_tasks)
+    }
+
+
+@router.get("/credits/balance")
+async def get_credits_balance():
+    orch = _get_orchestrator()
+    return orch.credits.get_balance("default_tenant") if hasattr(orch, "credits") else {"tool_calls_remaining": 0, "tokens_remaining": 0, "compute_seconds_remaining": 0}
+
+
+@router.get("/swarm/status")
+async def get_swarm_status():
+    orch = _get_orchestrator()
+    return {"agents": orch.swarm.get_swarm_status() if hasattr(orch, "swarm") else []}
+
+
+@router.get("/ui-schema")
+async def get_ui_schema():
+    config_path = _runtime_yaml_path()
+    if not config_path.exists():
+        return {"categories": []}
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    return {"categories": []}
+
+
+@router.get("/project/registry")
 async def get_project_registry():
     orchestrator = _get_orchestrator()
     config = _load_runtime_yaml()
     return build_project_registry(orchestrator=orchestrator, config=config)
 
 
-@router.get("/api/project/folders")
+@router.get("/project/folders")
 async def list_project_folders():
     config = _load_runtime_yaml()
     registry = ensure_project_registry(config)
     return {"folders": registry.get("folders", [])}
 
 
-@router.post("/api/project/folders")
+@router.post("/project/folders")
 async def add_project_folder(payload: Dict[str, Any]):
     path = (payload.get("path") or "").strip()
     if not path:
@@ -105,7 +151,7 @@ async def add_project_folder(payload: Dict[str, Any]):
     return {"folders": folders}
 
 
-@router.delete("/api/project/folders")
+@router.delete("/project/folders")
 async def remove_project_folder(path: str):
     config = _load_runtime_yaml()
     registry = ensure_project_registry(config)
@@ -204,7 +250,7 @@ def _update_runtime_governance(orchestrator, payload: Dict[str, Any]) -> Dict[st
     return config
 
 
-@router.get("/api/surfaces")
+@router.get("/surfaces")
 async def get_surfaces():
     orchestrator = _get_orchestrator()
 
@@ -224,7 +270,7 @@ async def get_surfaces():
     }
 
 
-@router.get("/api/models/status")
+@router.get("/models/status")
 async def get_models_status():
     orchestrator = _get_orchestrator()
     providers = [_provider_to_dict(provider) for provider in orchestrator.config.llm.providers]
@@ -237,20 +283,20 @@ async def get_models_status():
     }
 
 
-@router.put("/api/models/status")
+@router.put("/models/status")
 async def update_models_status(payload: Dict[str, Any]):
     orchestrator = _get_orchestrator()
     _update_runtime_models(orchestrator, payload)
     return await get_models_status()
 
 
-@router.get("/api/runtime/config")
+@router.get("/runtime/config")
 async def get_system_config():
     orchestrator = _get_orchestrator()
     config = _load_runtime_yaml()
     return {"features": config.get("features", {})}
 
-@router.patch("/api/runtime/config")
+@router.patch("/runtime/config")
 async def patch_system_config(payload: Dict[str, Any]):
     orchestrator = _get_orchestrator()
     config = _load_runtime_yaml()
@@ -263,7 +309,7 @@ async def patch_system_config(payload: Dict[str, Any]):
     _save_runtime_yaml(config)
     return {"status": "success", "features": config.get("features", {})}
 
-@router.get("/api/governance/config")
+@router.get("/governance/config")
 async def get_governance_config():
     orchestrator = _get_orchestrator()
     return {
@@ -273,20 +319,20 @@ async def get_governance_config():
     }
 
 
-@router.put("/api/governance/config")
+@router.put("/governance/config")
 async def update_governance_config(payload: Dict[str, Any]):
     orchestrator = _get_orchestrator()
     _update_runtime_governance(orchestrator, payload)
     return await get_governance_config()
 
 
-@router.get("/api/jobs")
+@router.get("/jobs")
 async def list_jobs(limit: int = 50):
     _get_orchestrator()
     return {"jobs": get_control_plane().list_jobs(limit=limit)}
 
 
-@router.post("/api/jobs")
+@router.post("/jobs")
 async def create_job(payload: Dict[str, Any]):
     orchestrator = _get_orchestrator()
     kind = payload.get("kind")
@@ -297,7 +343,7 @@ async def create_job(payload: Dict[str, Any]):
     return {"job": job}
 
 
-@router.get("/api/jobs/{job_id}")
+@router.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     _get_orchestrator()
     job = get_control_plane().get_job(job_id)
@@ -306,7 +352,7 @@ async def get_job(job_id: str):
     return {"job": job}
 
 
-@router.post("/api/jobs/{job_id}/cancel")
+@router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
     _get_orchestrator()
     job = await get_control_plane().cancel_job(job_id)
@@ -315,13 +361,13 @@ async def cancel_job(job_id: str):
     return {"job": job}
 
 
-@router.get("/api/artifacts")
+@router.get("/artifacts")
 async def list_artifacts(limit: int = 50):
     _get_orchestrator()
     return {"artifacts": get_control_plane().list_artifacts(limit=limit)}
 
 
-@router.get("/api/artifacts/{artifact_id}")
+@router.get("/artifacts/{artifact_id}")
 async def get_artifact(artifact_id: str):
     _get_orchestrator()
     artifact = get_control_plane().get_artifact(artifact_id)
@@ -334,7 +380,7 @@ async def get_artifact(artifact_id: str):
 # Phase 2 APIs — Governance, MCP Management, A2A, Auto-Tune, File Tree
 # ════════════════════════════════════════════════════════════════════
 
-@router.get("/api/governance/audit")
+@router.get("/governance/audit")
 async def governance_audit(limit: int = 100):
     """Return governance audit trail for the dashboard timeline."""
     from project_kernel_runtime.services.fastapi_server import orchestrator
@@ -359,7 +405,7 @@ async def governance_audit(limit: int = 100):
     }
 
 
-@router.get("/api/governance/approvals")
+@router.get("/governance/approvals")
 async def governance_approvals():
     orchestrator = _get_orchestrator()
     pending = getattr(orchestrator.governance, "_pending_approvals", {})
@@ -370,7 +416,7 @@ async def governance_approvals():
     return {"approvals": approvals}
 
 
-@router.post("/api/governance/approvals/{approval_id}")
+@router.post("/governance/approvals/{approval_id}")
 async def resolve_governance_approval(approval_id: str, payload: Dict[str, Any]):
     orchestrator = _get_orchestrator()
     approved = bool(payload.get("approved", False))
@@ -381,7 +427,7 @@ async def resolve_governance_approval(approval_id: str, payload: Dict[str, Any])
     return {"approval_id": approval_id, "approved": approved}
 
 
-@router.get("/api/events")
+@router.get("/events")
 async def list_event_stream(limit: int = 100, session_id: Optional[str] = None, task_id: Optional[str] = None):
     orchestrator = _get_orchestrator()
     events = orchestrator.event_bus.get_event_log(last_n=limit)
@@ -403,7 +449,7 @@ async def list_event_stream(limit: int = 100, session_id: Optional[str] = None, 
     return {"events": payload}
 
 
-@router.post("/api/mcp/registry")
+@router.post("/mcp/registry")
 async def register_mcp_server(payload: Dict[str, Any]):
     """Add a new MCP server configuration dynamically to runtime.yaml."""
     config = _load_runtime_yaml()
@@ -422,7 +468,7 @@ async def register_mcp_server(payload: Dict[str, Any]):
     _save_runtime_yaml(config)
     return {"status": "success", "server": name}
 
-@router.get("/api/mcp/registry")
+@router.get("/mcp/registry")
 async def mcp_full_registry():
     """Full MCP registry with runtime status for management UI."""
     from project_kernel_runtime.services.fastapi_server import orchestrator
@@ -460,7 +506,7 @@ async def mcp_full_registry():
     }
 
 
-@router.post("/api/mcp/servers/{name}/toggle")
+@router.post("/mcp/servers/{name}/toggle")
 async def toggle_mcp_server(name: str, payload: Dict[str, Any]):
     """Enable/disable an MCP server and persist to runtime.yaml."""
     config = _load_runtime_yaml()
@@ -472,7 +518,7 @@ async def toggle_mcp_server(name: str, payload: Dict[str, Any]):
     return {"name": name, "disabled": servers[name]["disabled"]}
 
 
-@router.post("/api/mcp/servers/{name}/start")
+@router.post("/mcp/servers/{name}/start")
 async def start_mcp_server(name: str):
     orchestrator = _get_orchestrator()
     config = _load_runtime_yaml()
@@ -491,7 +537,7 @@ async def start_mcp_server(name: str):
     }
 
 
-@router.post("/api/mcp/servers/{name}/stop")
+@router.post("/mcp/servers/{name}/stop")
 async def stop_mcp_server(name: str):
     orchestrator = _get_orchestrator()
     disconnected = await orchestrator.mcp_bridge.disconnect(name)
@@ -500,7 +546,7 @@ async def stop_mcp_server(name: str):
     return {"stopped": True, "server": name}
 
 
-@router.get("/api/a2a/topology")
+@router.get("/a2a/topology")
 async def a2a_topology():
     """Return graph nodes/edges for A2A mesh visualization."""
     from project_kernel_runtime.services.fastapi_server import orchestrator
@@ -540,7 +586,7 @@ async def a2a_topology():
     }
 
 
-@router.post("/api/a2a/delegate")
+@router.post("/a2a/delegate")
 async def delegate_a2a_task(payload: Dict[str, Any]):
     orchestrator = _get_orchestrator()
     description = (payload.get("description") or "").strip()
@@ -575,7 +621,7 @@ async def delegate_a2a_task(payload: Dict[str, Any]):
     return {"job": job, "target_peer": target_peer}
 
 
-@router.post("/api/auto-tune")
+@router.post("/auto-tune")
 async def auto_tune(payload: Dict[str, Any]):
     """AI-driven auto-tune: suggest optimal parameter changes."""
     from project_kernel_runtime.services.fastapi_server import orchestrator
@@ -648,7 +694,7 @@ async def auto_tune(payload: Dict[str, Any]):
     }
 
 
-@router.post("/api/auto-tune/apply")
+@router.post("/auto-tune/apply")
 async def apply_auto_tune(payload: Dict[str, Any]):
     """Apply an auto-tune suggestion by updating runtime.yaml."""
     param = payload.get("param", "")
@@ -669,7 +715,7 @@ async def apply_auto_tune(payload: Dict[str, Any]):
     return {"applied": True, "param": param, "value": value}
 
 
-@router.get("/api/workspace/tree")
+@router.get("/workspace/tree")
 async def workspace_file_tree(path: Optional[str] = None, depth: int = 3):
     """Return a file/folder tree for IDE-style explorer in the UI."""
 
@@ -713,7 +759,7 @@ async def workspace_file_tree(path: Optional[str] = None, depth: int = 3):
     return {"tree": tree, "root": str(root), "exists": True}
 
 
-@router.get("/api/workspace/file")
+@router.get("/workspace/file")
 async def read_workspace_file(path: str = ""):
     """Read a file's content for the IDE viewer."""
     fp = _resolve_workspace_path(path)
@@ -736,7 +782,7 @@ async def read_workspace_file(path: str = ""):
 # Phase 3 APIs — Skills Registry, Provider Live Check, Heartbeat
 # ════════════════════════════════════════════════════════════════════
 
-@router.get("/api/skills/registry")
+@router.get("/skills/registry")
 async def get_skills_registry():
     """Return the full skills registry from runtime.yaml."""
     config = _load_runtime_yaml()
@@ -749,7 +795,7 @@ async def get_skills_registry():
     }
 
 
-@router.post("/api/skills/{name}/toggle")
+@router.post("/skills/{name}/toggle")
 async def toggle_skill(name: str, payload: Dict[str, Any]):
     """Enable or disable a skill globally in runtime.yaml."""
     enabled = payload.get("enabled", True)
@@ -773,7 +819,7 @@ async def toggle_skill(name: str, payload: Dict[str, Any]):
     return {"name": name, "enabled": enabled}
 
 
-@router.get("/api/providers/live")
+@router.get("/providers/live")
 async def get_providers_live():
     """Return live provider status from runtime.yaml with reachability check."""
     config = _load_runtime_yaml()
@@ -851,7 +897,7 @@ def _hb_conn() -> sqlite3.Connection:
     return conn
 
 
-@router.get("/api/heartbeat")
+@router.get("/heartbeat")
 async def get_heartbeat_schedule():
     """Return all scheduled heartbeat tasks."""
     conn = _hb_conn()
@@ -860,7 +906,7 @@ async def get_heartbeat_schedule():
     return {"tasks": [dict(r) for r in rows]}
 
 
-@router.post("/api/heartbeat")
+@router.post("/heartbeat")
 async def create_heartbeat_task(payload: Dict[str, Any]):
     """Schedule a new proactive heartbeat task (persisted to SQLite)."""
     label = payload.get("label", "Heartbeat Task")
@@ -885,7 +931,7 @@ async def create_heartbeat_task(payload: Dict[str, Any]):
     return {"id": task_id, "label": label, "cron": cron, "task": task_text, "created_at": now}
 
 
-@router.post("/api/heartbeat/{task_id}/toggle")
+@router.post("/heartbeat/{task_id}/toggle")
 async def toggle_heartbeat(task_id: str, payload: Dict[str, Any]):
     """Enable or disable a heartbeat task."""
     enabled = 1 if payload.get("enabled", True) else 0
@@ -896,7 +942,7 @@ async def toggle_heartbeat(task_id: str, payload: Dict[str, Any]):
     return {"id": task_id, "enabled": bool(enabled)}
 
 
-@router.delete("/api/heartbeat/{task_id}")
+@router.delete("/heartbeat/{task_id}")
 async def delete_heartbeat(task_id: str):
     """Delete a heartbeat task."""
     conn = _hb_conn()
@@ -905,7 +951,7 @@ async def delete_heartbeat(task_id: str):
     conn.close()
     return {"deleted": task_id}
 
-@router.get("/api/models/available")
+@router.get("/models/available")
 async def get_available_models():
     """Fetch locally running Ollama models, and inject standard Cloud models."""
     import aiohttp

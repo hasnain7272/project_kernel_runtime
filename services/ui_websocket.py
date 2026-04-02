@@ -15,10 +15,14 @@ import uuid
 import yaml
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from project_kernel_runtime.kernel.event_bus import AgentEvent
 from dataclasses import dataclass, field
 from enum import Enum
 from fastapi import WebSocket, WebSocketDisconnect, Query
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +196,17 @@ class UIEventBroadcaster:
                     sent += 1
         return sent
     
+    def broadcast_sync(self, message: Dict, event_type: Optional[str] = None) -> None:
+        """Synchronous wrapper to broadcast from non-async contexts if needed."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(self.broadcast(message, event_type), loop)
+            else:
+                loop.run_until_complete(self.broadcast(message, event_type))
+        except Exception:
+            pass
+    
     async def get_buffered_events(self, limit: int = 100) -> List[Dict]:
         return self._event_buffer[-limit:]
     
@@ -206,11 +221,31 @@ class UIWebSocketHandler:
     def __init__(self):
         self.broadcaster = UIEventBroadcaster()
         self.config = ConfigManager()
+        self._orchestrator = None
+
+    async def link_orchestrator(self, orchestrator):
+        """Link the orchestrator and subscribe to its event bus."""
+        self._orchestrator = orchestrator
+        # Subscribe to all events and broadcast them to UI
+        orchestrator.event_bus.subscribe("*", self._on_kernel_event)
+        logger.info("[WS] Linked to Orchestrator EventBus")
+
+    async def _on_kernel_event(self, event: "AgentEvent"):
+        """Handle events from the kernel and broadcast to UI."""
+        await self.broadcaster.broadcast({
+            "type": "event",
+            "event_type": event.type,
+            "session_id": event.session_id,
+            "task_id": event.task_id,
+            "timestamp": event.timestamp.isoformat(),
+            "data": event.payload
+        })
     
     async def handle_connection(self, websocket: WebSocket, client_id: str) -> None:
         client = await self.broadcaster.connect(client_id, websocket)
         
         try:
+            from uuid import uuid4
             buffered = await self.broadcaster.get_buffered_events()
             if buffered:
                 await websocket.send_json({
