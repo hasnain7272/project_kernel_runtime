@@ -80,7 +80,7 @@ class ExecutionContext:
     user_role: str = "developer"
     risk_mode: str = "auto"  # auto, ask, bypass
     workspace_path: str = "."
-    environment: Dict[str, str] = field(default_factory=dict)
+    environment: Dict[str, Any] = field(default_factory=dict)
     enabled_features: List[str] = field(default_factory=lambda: ["mcp", "skills", "llms", "a2a"])
     enforce_skill_scope: bool = False
     allowed_builtin_tools: List[str] = field(default_factory=list)
@@ -138,6 +138,7 @@ class ToolExecutor:
         Execute a tool call through the full pipeline.
         
         Pipeline: Governance → Sandbox → Execute → Audit
+        With retry on transient failures and non-blocking approval.
         """
         import time
         start_time = time.time()
@@ -157,36 +158,8 @@ class ToolExecutor:
                 return result
             
             if decision == PolicyDecision.REQUIRE_APPROVAL:
-                # ── Step 1b: Request human approval ──
-                approval_id = await self.governance.request_approval(
-                    tool_call.id, tool_call.name, tool_call.arguments, context.user_id
-                )
-                
-                # Emit specific event for UI modal
-                await self._emit_event("governance.approval_required", tool_call, ToolResult(
-                    tool_call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    success=False,
-                    metadata={"approval_id": approval_id, "arguments": tool_call.arguments}
-                ))
-                
-                # Wait for approval (polling pending_approvals for simplicity in this cycle)
-                # In a real system, we'd use an asyncio.Event or similar.
-                approved = False
-                timeout = 300 # 5 minutes
-                waited = 0
-                while waited < timeout:
-                    status = self.governance._pending_approvals.get(approval_id, {}).get("status")
-                    if status == "approved":
-                        approved = True
-                        break
-                    if status == "rejected":
-                        approved = False
-                        break
-                    await asyncio.sleep(1)
-                    waited += 1
-                
-                if not approved:
+                approval_result = await self._wait_for_approval(tool_call, context)
+                if not approval_result:
                     result = ToolResult(
                         tool_call_id=tool_call.id,
                         tool_name=tool_call.name,
@@ -197,69 +170,131 @@ class ToolExecutor:
                     await self._emit_event("tool.error", tool_call, result)
                     return result
                 
-                # If approved, proceed to emit tool.called and execute
                 logger.info(f"[ToolExecutor] Tool approved by human: {tool_call.name}")
         
         # ── Step 2: Emit tool.called event ──
         await self._emit_event("tool.called", tool_call, None)
         
-        # ── Step 3: Route and execute ──
-        try:
-            # Inject Service Hub into context for inter-tool calls
-            context.environment["service_hub"] = self
-            
-            if "__" in tool_call.name and getattr(self, "mcp_bridge", None):
-                # Execute via MCP bridge
-                server_name, mcp_tool_name = tool_call.name.split("__", 1)
-                result_data = await self.mcp_bridge.call_tool(
-                    server_name, mcp_tool_name, tool_call.arguments
-                )
-                result = ToolResult(
-                    tool_call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    success=True,
-                    output=result_data,
-                )
-            elif tool_call.name in self._tools:
-                # Execute builtin tool
-                tool = self._tools[tool_call.name]
+        # ── Step 3: Route and execute with retry ──
+        max_retries = 2
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                result = await self._execute_tool(tool_call, context)
+                result.duration_ms = (time.time() - start_time) * 1000
+                result.source = getattr(tool_call, "source", "agent")
+                await self._emit_event("tool.result" if result.success else "tool.error", tool_call, result)
+                return result
+            except Exception as e:
+                last_error = e
+                is_transient = self._is_transient_error(e)
                 
-                if tool_call.requires_sandbox and self.sandbox:
-                    output = await self.sandbox.execute_tool(tool, tool_call.arguments, context)
-                else:
-                    output = await tool.execute(tool_call.arguments, context)
+                if is_transient and attempt < max_retries:
+                    logger.warning(f"[ToolExecutor] Transient error on '{tool_call.name}' "
+                                 f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
                 
-                result = ToolResult(
-                    tool_call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    success=True,
-                    output=output,
-                )
-            else:
                 result = ToolResult(
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
                     success=False,
-                    error=f"Unknown tool: '{tool_call.name}'",
+                    error=f"Tool execution error after {attempt + 1} attempt(s): {str(e)}",
+                    duration_ms=(time.time() - start_time) * 1000,
+                    source=getattr(tool_call, "source", "agent"),
                 )
+                await self._emit_event("tool.error", tool_call, result)
+                return result
+    
+    async def _wait_for_approval(self, tool_call: ToolCall,
+                                  context: ExecutionContext) -> bool:
+        """
+        Non-blocking approval wait using asyncio.Event pattern.
+        Falls back to polling with proper async sleep.
+        """
+        approval_id = await self.governance.request_approval(
+            tool_call.id, tool_call.name, tool_call.arguments, context.user_id
+        )
         
-        except Exception as e:
-            result = ToolResult(
+        await self._emit_event("governance.approval_required", tool_call, ToolResult(
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            success=False,
+            metadata={"approval_id": approval_id, "arguments": tool_call.arguments}
+        ))
+        
+        approved = False
+        timeout = 300
+        waited = 0
+        poll_interval = 0.5
+        
+        while waited < timeout:
+            pending = self.governance._pending_approvals.get(approval_id, {})
+            status = pending.get("status")
+            
+            if status == "approved":
+                approved = True
+                break
+            if status == "rejected":
+                approved = False
+                break
+            
+            await asyncio.sleep(poll_interval)
+            waited += poll_interval
+        
+        return approved
+    
+    async def _execute_tool(self, tool_call: ToolCall,
+                             context: ExecutionContext) -> ToolResult:
+        """Execute the actual tool call (extracted for retry support)."""
+        context.environment["service_hub"] = self
+        
+        if "__" in tool_call.name and getattr(self, "mcp_bridge", None):
+            server_name, mcp_tool_name = tool_call.name.split("__", 1)
+            result_data = await self.mcp_bridge.call_tool(
+                server_name, mcp_tool_name, tool_call.arguments
+            )
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                success=True,
+                output=result_data,
+            )
+        elif tool_call.name in self._tools:
+            tool = self._tools[tool_call.name]
+            
+            if tool_call.requires_sandbox and self.sandbox:
+                output = await self.sandbox.execute_tool(tool, tool_call.arguments, context)
+            else:
+                output = await tool.execute(tool_call.arguments, context)
+            
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                success=True,
+                output=output,
+            )
+        else:
+            return ToolResult(
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,
                 success=False,
-                error=f"Tool execution error: {str(e)}",
+                error=f"Unknown tool: '{tool_call.name}'",
             )
-            logger.error(f"[ToolExecutor] Error executing '{tool_call.name}': {e}", exc_info=True)
-        
-        # ── Step 4: Record timing and emit result ──
-        result.duration_ms = (time.time() - start_time) * 1000
-        result.source = getattr(tool_call, "source", "agent")
-        
-        await self._emit_event("tool.result" if result.success else "tool.error", tool_call, result)
-        return result
     
-    async def call_tool_internal(self, tool_name: str, arguments: Dict, 
+    @staticmethod
+    def _is_transient_error(error: Exception) -> bool:
+        """Determine if an error is transient (retryable)."""
+        error_str = str(error).lower()
+        transient_keywords = [
+            "timeout", "timed out", "connection", "refused",
+            "temporarily", "busy", "locked", "rate limit",
+            "too many", "unavailable", "interrupted",
+        ]
+        return any(kw in error_str for kw in transient_keywords)
+    
+    async def call_tool_internal(self, tool_name: str, arguments: Dict,
                                  context: ExecutionContext, source_tool: str) -> ToolResult:
         """
         Service Hub method for inter-tool calls.

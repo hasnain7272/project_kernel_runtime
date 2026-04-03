@@ -364,9 +364,9 @@ class Orchestrator:
 
     async def execute_agentic_loop(self, task_description: str,
                                      user_id: str = "agent",
-                                     session_id: str = None,
+                                     session_id: Optional[str] = None,
                                      max_iterations: int = 20,
-                                     context_bindings: Dict[str, List[str]] = None) -> Dict[str, Any]:
+                                     context_bindings: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
         """
         Core agentic loop — Manager-based multi-agent orchestration.
         
@@ -375,7 +375,6 @@ class Orchestrator:
         
         This replaces the single prompt loop with proper A2A multi-agent.
         """
-        from project_kernel_runtime.cognition.llm_provider import LLMMessage
         from .task_state_machine import TaskType, TaskStep, TaskStatus
 
         task = self.tasks.create_task(
@@ -387,7 +386,6 @@ class Orchestrator:
 
         session = self.sessions.get_session(session_id) if session_id else None
         
-        # Get context
         ctx = {
             "workspace_path": session.workspace_path if session else ".",
             "tools": self._session_allowed_builtin_tools(session, context_bindings),
@@ -395,7 +393,6 @@ class Orchestrator:
             "session_manager": self.sessions,
         }
         
-        # Use Manager for multi-agent execution
         try:
             from .manager import get_manager
             manager = get_manager(self.llm, self.tool_executor, self.event_bus)
@@ -406,7 +403,6 @@ class Orchestrator:
                 context=ctx,
             )
             
-            # Check result BEFORE completing - don't mark error as completed
             if result.get("status") == "error":
                 task.status = TaskStatus.FAILED
                 task.error = result.get("response", result.get("error", "Unknown error"))
@@ -422,7 +418,6 @@ class Orchestrator:
                     "mode": "manager_failed",
                 }
             
-            # Add to session history BEFORE returning so pollCore picks it up
             if session_id and session:
                 self.sessions.add_message_to_session(session_id, "assistant", result.get("response", ""))
             
@@ -433,7 +428,7 @@ class Orchestrator:
             
             await self.event_bus.emit_and_publish("task.completed", {
                 "task_id": task.id,
-                "iterations": 1,
+                "iterations": result.get("iterations", 1),
                 "mode": "manager",
             }, source="orchestrator")
             
@@ -448,248 +443,17 @@ class Orchestrator:
             
         except Exception as e:
             logger.error(f"[Orchestrator] Manager failed: {e}")
-            # Real error handling - emit to UI, don't fallback
             await self.event_bus.emit_and_publish("agent.error", {
                 "task_id": task.id,
                 "error": str(e),
             }, source="orchestrator")
             
-            # Return error - no fallback to single prompt
             return {
                 "task_id": task.id,
                 "response": f"Agent error: {str(e)[:100]}",
                 "mode": "manager_failed",
                 "error": str(e),
             }
-
-        # If we get here, something is wrong - shouldn't happen
-        return {"task_id": task.id, "response": "Unknown state", "mode": "error"}
-        
-        # ── Build conversation ──
-        sys_prompt = self._build_system_prompt(session)
-        if context_bindings:
-            folders = context_bindings.get("folders", [])
-            skills = context_bindings.get("skills", [])
-            mcp = context_bindings.get("mcp_servers", [])
-            if folders or skills or mcp:
-                sys_prompt += "\n\nAttached context: "
-                if folders: sys_prompt += f"Folders: {', '.join(folders)}. "
-                if skills: sys_prompt += f"Skills: {', '.join(skills)}. "
-                if mcp: sys_prompt += f"MCP: {', '.join(mcp)}."
-
-        conversation = [LLMMessage(role="system", content=sys_prompt)]
-        
-        # Inject chat history
-        if session and getattr(session, "conversation_messages", None):
-            for msg in session.conversation_messages:
-                if msg.get("role") == "user" and msg.get("content") == task_description:
-                    continue
-                content = msg.get("content")
-                if content:
-                    conversation.append(LLMMessage(role=msg.get("role", "user"), content=content))
-        
-        conversation.append(LLMMessage(role="user", content=task_description))
-        
-        if session_id and hasattr(self.sessions, 'add_message_to_session'):
-            last_msg = session.conversation_messages[-1] if session and session.conversation_messages else None
-            if not last_msg or last_msg.get("content") != task_description:
-                self.sessions.add_message_to_session(session_id, "user", task_description)
-
-        results = []
-        tools_for_llm = self._get_tool_schemas(session, context_bindings)
-
-        for iteration in range(max_iterations):
-            # Signal thinking
-            await self.event_bus.emit_and_publish("agent.thought", {
-                "task_id": task.id, "session_id": session_id,
-                "iteration": iteration + 1,
-                "content": f"Working on it (step {iteration + 1})..."
-            }, source="orchestrator")
-
-            response = await self.llm.complete(
-                messages=conversation,
-                tools=tools_for_llm if tools_for_llm else None,
-                task_type="code_generation",
-            )
-
-            # ── Fallback: parse tool calls from text (local LLM workaround) ──
-            if not response.tool_calls and tools_for_llm and response.content:
-                parsed = self._parse_tool_calls_from_text(
-                    response.content,
-                    [t.get("function", {}).get("name", "") for t in tools_for_llm]
-                )
-                if parsed:
-                    response.tool_calls = parsed
-                    response.content = ""
-
-            # ── No tool calls = agent is done talking ──
-            if not response.tool_calls:
-                answer = response.content or ""
-                if session_id and answer:
-                    self.sessions.add_message_to_session(session_id, "assistant", answer)
-                task.status = TaskStatus.COMPLETED
-                self.tasks.save_task(task)
-                await self.event_bus.emit_and_publish("task.completed", {
-                    "task_id": task.id, "iterations": iteration + 1, "tool_calls": len(results),
-                }, source="orchestrator")
-                return {
-                    "task_id": task.id, "response": answer,
-                    "tool_results": results, "iterations": iteration + 1,
-                    "usage": self.llm.get_usage_stats(),
-                }
-
-            # ── Execute tool calls ──
-            conversation.append(LLMMessage(
-                role="assistant", content=response.content or "",
-                tool_calls=response.tool_calls,
-            ))
-            
-            if session_id and response.content:
-                self.sessions.add_message_to_session(session_id, "assistant", response.content)
-
-            for tool_call in response.tool_calls:
-                func = tool_call.get("function", {})
-                tool_name = func.get("name", "").strip()
-                raw_args = func.get("arguments", "{}")
-                try:
-                    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-
-                if not tool_name:
-                    continue
-
-                # Signal executing
-                await self.event_bus.emit_and_publish("tool.executing", {
-                    "task_id": task.id, "session_id": session_id,
-                    "tool_name": tool_name, "arguments": args
-                }, source="orchestrator")
-
-                from .tool_executor import ToolCall as TC, ExecutionContext
-                tc = TC(name=tool_name, arguments=args)
-                
-                # Get session-scoped permissions - MUST pass context_bindings
-                allowed_tools = self._session_allowed_builtin_tools(session, context_bindings)
-                allowed_folders = getattr(session, "folders", []) or []
-                allowed_mcp = getattr(session, "mcp_servers", []) or []
-                
-                ctx = ExecutionContext(
-                    user_id=user_id,
-                    session_id=session_id or "default",
-                    workspace_path=session.workspace_path if session else ".",
-                    enabled_features=["skills", "llms", "mcp", "a2a"],
-                    enforce_skill_scope=True,  # Force skill scoping
-                    allowed_builtin_tools=allowed_tools,
-                    allowed_mcp_servers=allowed_mcp,
-                    allowed_folders=allowed_folders,
-                )
-
-                result = await self.tool_executor.execute(tc, ctx)
-                results.append({
-                    "tool": tool_name,
-                    "result": {"success": result.success, "output": result.output, "error": result.error}
-                })
-
-                # ── Tool result with system reminder (Claude Code pattern) ──
-                if result.success:
-                    tool_output = str(result.output)[:4000] if result.output else "Done."
-                    tool_output += f"\n\n[Reminder: You are working in {(session.workspace_path if session else '.')}. Continue with the next step or respond to the user if done.]"
-                else:
-                    tool_output = f"Error: {result.error}\n\n[Try a different approach or tell the user what went wrong.]"
-
-                conversation.append(LLMMessage(
-                    role="tool", content=tool_output,
-                    tool_call_id=tool_call.get("id", ""), name=tool_name,
-                ))
-
-        # Max iterations reached
-        task.status = TaskStatus.COMPLETED
-        self.tasks.save_task(task)
-        return {
-            "task_id": task.id,
-            "response": "[Completed the task after reaching the step limit.]",
-            "tool_results": results, "iterations": max_iterations,
-            "usage": self.llm.get_usage_stats(),
-        }
-
-    @staticmethod
-    def _parse_tool_calls_from_text(text: str, available_tools: List[str]) -> Optional[List[Dict]]:
-        """Parse tool calls from raw text when the LLM returns JSON instead of using function-calling API.
-        
-        Handles formats like:
-        - {"function": "read_file", "parameters": {"path": "test.txt"}}
-        - {"name": "list_directory", "arguments": {"path": "."}}
-        - [{"function": "search_files", "parameters": {...}}]
-        - Multiple JSON objects in text
-        """
-        import json
-        import uuid
-        
-        if not text or not available_tools:
-            return None
-        
-        tool_calls = []
-        
-        # Try to find JSON objects/arrays in the text
-        # Strategy 1: Try parsing the entire text as JSON (single call or array)
-        for candidate in [text.strip(), text.strip().rstrip('.!?')]:
-            try:
-                parsed = json.loads(candidate)
-                items = parsed if isinstance(parsed, list) else [parsed]
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    # Detect function name from various key names
-                    func_name = (
-                        item.get("function") or item.get("name") or 
-                        item.get("tool") or item.get("tool_name") or ""
-                    )
-                    # Detect arguments from various key names
-                    args = (
-                        item.get("parameters") or item.get("arguments") or 
-                        item.get("args") or item.get("input") or {}
-                    )
-                    if func_name and func_name in available_tools:
-                        tool_calls.append({
-                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                            "type": "function",
-                            "function": {
-                                "name": func_name,
-                                "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
-                            }
-                        })
-                if tool_calls:
-                    return tool_calls
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        # Strategy 2: Find JSON objects embedded in text using regex
-        json_pattern = re.compile(r'\{[^{}]*"?(?:function|name|tool|tool_name)"?\s*:\s*"[^"]+"[^{}]*\}', re.DOTALL)
-        matches = json_pattern.findall(text)
-        for match in matches:
-            try:
-                parsed = json.loads(match)
-                func_name = (
-                    parsed.get("function") or parsed.get("name") or
-                    parsed.get("tool") or parsed.get("tool_name") or ""
-                )
-                args = (
-                    parsed.get("parameters") or parsed.get("arguments") or
-                    parsed.get("args") or parsed.get("input") or {}
-                )
-                if func_name and func_name in available_tools:
-                    tool_calls.append({
-                        "id": f"call_{uuid.uuid4().hex[:8]}",
-                        "type": "function",
-                        "function": {
-                            "name": func_name,
-                            "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
-                        }
-                    })
-            except (json.JSONDecodeError, TypeError):
-                continue
-        
-        return tool_calls if tool_calls else None
 
 
     def _build_system_prompt(self, session=None) -> str:
