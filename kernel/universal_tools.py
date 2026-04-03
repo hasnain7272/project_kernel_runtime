@@ -714,54 +714,16 @@ class WebSearchTool(BaseTool):
     }
     
     async def execute(self, arguments: Dict[str, Any], context=None) -> Any:
-        query = arguments["query"]
+        from .web_search import web_search as do_search
+        query = arguments.get("query") or arguments.get("q", "")
         max_results = arguments.get("max_results", 5)
         
-        try:
-            import httpx
-        except ImportError:
-            return {"error": "httpx not installed. Run: pip install httpx"}
+        if not query:
+            return {"error": "Query is required"}
         
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                response = await client.get(
-                    "https://lite.duckduckgo.com/lite/",
-                    params={"q": query},
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; AntigravityAgent/1.0)"}
-                )
-                
-                if response.status_code != 200:
-                    return {"error": f"Search returned status {response.status_code}"}
-                
-                # Parse basic results from HTML
-                text = response.text
-                results = []
-                
-                # Extract links and snippets from DuckDuckGo Lite HTML
-                link_pattern = re.compile(
-                    r'<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>\s*(.+?)\s*</a>',
-                    re.DOTALL
-                )
-                snippet_pattern = re.compile(r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>', re.DOTALL)
-                
-                links = link_pattern.findall(text)
-                snippets = snippet_pattern.findall(text)
-                
-                for i, (url, title) in enumerate(links[:max_results]):
-                    title = re.sub(r'<[^>]+>', '', title).strip()
-                    snippet = ""
-                    if i < len(snippets):
-                        snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
-                    
-                    if url.startswith('http'):
-                        results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": snippet[:300],
-                        })
-                
-                return {"results": results, "query": query}
-                
+            results = await do_search(query, max_results=int(max_results))
+            return {"results": results, "query": query, "total_found": len(results)}
         except Exception as e:
             return {"error": f"Search failed: {type(e).__name__}: {str(e)}"}
 

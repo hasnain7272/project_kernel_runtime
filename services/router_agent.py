@@ -93,7 +93,8 @@ async def _run_agent_task(orchestrator, task, user_id: str, session_id: str, des
             max_iterations=max_iterations,
             context_bindings=context_bindings
         )
-        task.complete_step(result)
+        # Store just the response string in step result, not the full dict
+        task.complete_step(result.get("response", ""))
         task.status = TaskStatus.COMPLETED
         task.updated_at = datetime.now(task.updated_at.tzinfo)
         orchestrator.tasks.save_task(task)

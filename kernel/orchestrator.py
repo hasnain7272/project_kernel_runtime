@@ -392,6 +392,7 @@ class Orchestrator:
             "workspace_path": session.workspace_path if session else ".",
             "tools": self._session_allowed_builtin_tools(session, context_bindings),
             "session_id": session_id,
+            "session_manager": self.sessions,
         }
         
         # Use Manager for multi-agent execution
@@ -421,6 +422,10 @@ class Orchestrator:
                     "mode": "manager_failed",
                 }
             
+            # Add to session history BEFORE returning so pollCore picks it up
+            if session_id and session:
+                self.sessions.add_message_to_session(session_id, "assistant", result.get("response", ""))
+            
             task.status = TaskStatus.COMPLETED
             if task.steps:
                 task.steps[0].result = result.get("response", "")
@@ -440,10 +445,6 @@ class Orchestrator:
                 "mode": "manager",
                 "usage": self.llm.get_usage_stats(),
             }
-            
-            # Add to session history so pollCore picks it up
-            if session_id and session:
-                self.sessions.add_message_to_session(session_id, "assistant", result.get("response", ""))
             
         except Exception as e:
             logger.error(f"[Orchestrator] Manager failed: {e}")

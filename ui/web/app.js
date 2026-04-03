@@ -563,6 +563,11 @@ function agenticIde() {
 
     async dispatchTask() {
       if (!this.userInput.trim() || !this.activeSession) return;
+      if (this.isExecuting) {
+        this.terminalOutput += `\n[System] Still processing previous request...`;
+        this.scrollToBottomTerminal();
+        return;
+      }
       const input = this.userInput.trim();
       this.userInput = '';
       this.isExecuting = true;
