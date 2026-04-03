@@ -398,10 +398,7 @@ class Orchestrator:
                 context=ctx,
             )
             
-            status = result.get("status", "unknown")
-            response = result.get("response", "")
-            
-            if status == "error":
+            if result.get("status") == "error":
                 task.status = TaskStatus.FAILED
                 task.error = result.get("response", result.get("error", "Unknown error"))
                 self.tasks.save_task(task)
@@ -453,6 +450,28 @@ class Orchestrator:
                 "error": str(e),
             }
 
+
+    def _build_system_prompt(self, session=None) -> str:
+        """Short system prompt — Claude Code style. Let the model do the work."""
+        workspace = session.workspace_path if session else "."
+        folders = ', '.join(getattr(session, 'folders', [])) if session else ""
+        
+        prompt = (
+            f"You are an AI coding assistant. Workspace: {workspace}\n"
+            f"Rules:\n"
+            f"- Use your tools to read, write, and execute. Don't just explain.\n"
+            f"- For file questions, use list_directory or read_file immediately.\n"
+            f"- For web questions, use web_search.\n"
+            f"- Chain tool calls when needed. Be concise.\n"
+            f"- You only have access to tools you've been given access to."
+        )
+        if folders:
+            prompt += f"\nBound folders: {folders}"
+        
+        # Add available tools to prompt so model knows
+        tools = self._session_allowed_builtin_tools(session)
+        prompt += f"\nAvailable tools: {', '.join(tools)}"
+        return prompt
 
     def _session_allowed_builtin_tools(self, session, context_bindings: Dict = None) -> List[str]:
         """Return tools available to a session.
