@@ -270,11 +270,6 @@ class Orchestrator:
         from .export_service import ExportService
         return ExportService()
 
-    @cached_property
-    def export_service(self):
-        from .export_service import ExportService
-        return ExportService()
-
     # ════════════════════════════════════════════════════════════════════
     # Lifecycle
     # ════════════════════════════════════════════════════════════════════
@@ -413,17 +408,17 @@ class Orchestrator:
                 }, source="orchestrator")
                 return {
                     "task_id": task.id,
-                    "response": result.get("response", ""),
+                    "response": response,
                     "error": task.error,
                     "mode": "manager_failed",
                 }
             
             if session_id and session:
-                self.sessions.add_message_to_session(session_id, "assistant", result.get("response", ""))
+                self.sessions.add_message_to_session(session_id, "assistant", response)
             
             task.status = TaskStatus.COMPLETED
             if task.steps:
-                task.steps[0].result = result.get("response", "")
+                task.steps[0].result = response
             self.tasks.save_task(task)
             
             await self.event_bus.emit_and_publish("task.completed", {
@@ -434,8 +429,8 @@ class Orchestrator:
             
             return {
                 "task_id": task.id,
-                "response": result.get("response", ""),
-                "plan": result.get("plan", []),
+                "response": response,
+                "plan": result.get("plan", {}),
                 "results": result.get("results", {}),
                 "mode": "manager",
                 "usage": self.llm.get_usage_stats(),
@@ -510,42 +505,6 @@ class Orchestrator:
         
         return list(dict.fromkeys(tools)) if tools else []
     
-    def _get_tool_schemas(self, session=None, context_bindings: Dict = None) -> List[Dict]:
-        """Get tool schemas for LLM function calling, including external MCP tools."""
-        from .universal_tools import get_all_tools
-        tools = get_all_tools()
-        allowed_builtin = set(self._session_allowed_builtin_tools(session, context_bindings))
-        if session is not None:
-            tools = [tool for tool in tools if tool.name in allowed_builtin]
-        schemas = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                }
-            }
-            for tool in tools
-        ]
-        
-        # Inject external MCP tools from the bridge
-        try:
-            external_tools = self.mcp_bridge.get_all_external_tools()
-            if session and getattr(session, "mcp_servers", None):
-                allowed_mcp = set(session.mcp_servers)
-                external_tools = [
-                    tool for tool in external_tools
-                    if tool.get("_mcp_server") in allowed_mcp
-                ]
-            schemas.extend(external_tools)
-            if external_tools:
-                logger.info(f"[Orchestrator] Injected {len(external_tools)} external MCP tools into LLM context")
-        except Exception as e:
-            logger.debug(f"[Orchestrator] No external MCP tools: {e}")
-        
-        return schemas
-
     # ════════════════════════════════════════════════════════════════════
     # Session Management
     # ════════════════════════════════════════════════════════════════════

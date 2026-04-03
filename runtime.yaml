@@ -70,28 +70,46 @@ sandbox:
   max_concurrent_sandboxes: 5
   cleanup_on_exit: true
 llm:
-  active_model: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+  active_model: ollama/llama3.1:8b
   providers:
   - name: ollama
     base_url: http://127.0.0.1:11500
-    default_model: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+    default_model: ollama/llama3.1:8b
     priority: 0
     enabled: true
+  - name: nvidia_nim
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_NIM_API_KEY
+    default_model: meta/llama-3.1-70b-instruct
+    priority: 1
+    enabled: false
   - name: anthropic
     api_key_env: ANTHROPIC_API_KEY
     default_model: claude-sonnet-4-20250514
-    priority: 1
+    priority: 2
     enabled: false
   - name: openai
     api_key_env: OPENAI_API_KEY
     default_model: gpt-4o
-    priority: 2
+    priority: 3
     enabled: false
+  # NVIDIA NIM Configuration (for complex tasks - uses NVIDIA AI Endpoints)
+  nvidia_nim:
+    enabled: true  # Enabled - agent will fall back to NIM when local model fails
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_NIM_API_KEY  # Set env var or use UI to configure
+    # Models per task type - uses Nemotron for complex reasoning tasks
+    models:
+      planning: nvidia/nemotron-3-super-120b-a12b
+      execution: nvidia/nemotron-3-super-120b-a12b
+      verification: nvidia/nemotron-3-super-120b-a12b
+      research: nvidia/nemotron-3-super-120b-a12b
+      architecture: nvidia/nemotron-3-super-120b-a12b
   model_router:
-    autocomplete: ollama/qwen2.5-coder:7b-instruct-q4_K_M
-    code_generation: ollama/qwen2.5-coder:7b-instruct-q4_K_M
-    architecture: ollama/qwen2.5-coder:7b-instruct-q4_K_M
-    research: ollama/qwen2.5-coder:7b-instruct-q4_K_M
+    autocomplete: ollama/llama3.1:8b
+    code_generation: ollama/llama3.1:8b
+    architecture: ollama/llama3.1:8b
+    research: ollama/llama3.1:8b
   fallback_enabled: false
   max_retries: 3
   rate_limit_rpm: 60

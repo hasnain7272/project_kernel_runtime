@@ -976,3 +976,52 @@ async def get_available_models():
     except Exception:
         pass
     return models
+
+
+@router.post("/nvidia-nim")
+async def configure_nvidia_nim(payload: Dict[str, Any]):
+    """Configure NVIDIA NIM API for complex tasks."""
+    orchestrator = _get_orchestrator()
+    base_url = payload.get("base_url", "https://integrate.api.nvidia.com/v1").strip()
+    api_key = payload.get("api_key", "").strip()
+    
+    if base_url:
+        os.environ["NVIDIA_NIM_BASE"] = base_url
+        orchestrator.llm.nvidia_nim_base = base_url
+    
+    if api_key:
+        os.environ["NVIDIA_NIM_API_KEY"] = api_key
+        orchestrator.llm.nvidia_nim_api_key = api_key
+    
+    # Save to runtime.yaml
+    config = _load_runtime_yaml()
+    nvim_cfg = config.setdefault("nvidia_nim", {})
+    nvim_cfg["enabled"] = bool(base_url)
+    nvim_cfg["base_url"] = base_url
+    nvim_cfg["models"] = {
+        "planning": "nvidia/nemotron-3-super-120b-a12b",
+        "execution": "nvidia/nemotron-3-super-120b-a12b",
+        "verification": "nvidia/nemotron-3-super-120b-a12b",
+        "research": "nvidia/nemotron-3-super-120b-a12b",
+        "architecture": "nvidia/nemotron-3-super-120b-a12b",
+    }
+    # Don't save the actual API key to file
+    _save_runtime_yaml(config)
+    
+    return {
+        "status": "configured",
+        "base_url": base_url,
+        "enabled": bool(base_url),
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+    }
+
+
+@router.get("/nvidia-nim")
+async def get_nvidia_nim_config():
+    """Get current NVIDIA NIM configuration."""
+    orchestrator = _get_orchestrator()
+    return {
+        "enabled": orchestrator.llm.nvidia_nim_enabled,
+        "base_url": orchestrator.llm.nvidia_nim_base or "",
+        "api_key_set": bool(orchestrator.llm.nvidia_nim_api_key),
+    }

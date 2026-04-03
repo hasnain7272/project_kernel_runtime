@@ -268,5 +268,12 @@ async def get_swarm_status():
     if not orchestrator: raise HTTPException(status_code=503, detail="Orchestrator not ready")
     return {"agents": orchestrator.swarm.get_swarm_status()}
 
+
+def run_server(host: str = "0.0.0.0", port: int = 8089):
+    """Run the FastAPI server."""
+    import uvicorn
+    uvicorn.run("project_kernel_runtime.services.fastapi_server:app", host=host, port=port, reload=True)
+
+
 if __name__ == "__main__":
-    uvicorn.run("project_kernel_runtime.services.fastapi_server:app", host="0.0.0.0", port=8089, reload=True)
+    run_server()

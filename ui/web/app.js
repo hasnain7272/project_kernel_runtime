@@ -26,6 +26,14 @@ function agenticIde() {
     // Dynamic Schema
     uiSchema: [],
 
+    // NVIDIA NIM Config
+    nvidiaNimBase: "",
+    nvidiaNimKey: "",
+    
+    // Session Governance
+    sessionFolder: "",
+    sessionFolders: [],
+
     // IDE Panes Info
     explorerNodes: [],
     selectedFile: null,
@@ -820,12 +828,32 @@ function agenticIde() {
           method: "POST",
           body: JSON.stringify({ provider: this.byokProvider, api_key: this.byokKey })
         });
-        this.terminalOutput += `\n[BYOK] Key saved for ${this.byokProvider}`;
+        this.terminalOutput += `[BYOK] Key saved for ${this.byokProvider}`;
         this.byokKey = "";
         this.scrollToBottomTerminal();
       } catch (err) {
-        this.terminalOutput += `\n[BYOK Error] ${err.message}`;
+        this.terminalOutput += `[BYOK Error] ${err.message}`;
       }
+    },
+
+    async saveNvidiaNim() {
+      if (!this.nvidiaNimBase.trim()) return;
+      try {
+        await this.api("/api/runtime/nvidia-nim", {
+          method: "POST",
+          body: JSON.stringify({ base_url: this.nvidiaNimBase, api_key: this.nvidiaNimKey })
+        });
+        this.terminalOutput += `[NIM] Configured: ${this.nvidiaNimBase}`;
+      } catch (err) {
+        this.terminalOutput += `[NIM Error] ${err.message}`;
+      }
+    },
+
+    async addSessionFolder() {
+      if (!this.sessionFolder.trim() || !this.activeSession) return;
+      this.sessionFolders.push(this.sessionFolder);
+      this.sessionFolder = "";
+      this.terminalOutput += `[Gov] Folder added to session`;
     },
 
     async searchMemory() {
