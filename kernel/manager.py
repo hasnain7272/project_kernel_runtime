@@ -109,9 +109,38 @@ class ManagerAgent:
                 "phase": ExecutionPhase.EXECUTING.value,
             })
         
+        # Filter tools based on plan's requirements - don't pass tools if none needed
+        required_tools = plan.get("requires_tools")
+        if required_tools is not None and len(required_tools) == 0:
+            # No tools needed - skip tool loop, get direct response
+            filtered_tool_schemas = []
+        elif required_tools:
+            # Filter to only the required tools
+            required_tool_names = set(required_tools)
+            filtered_tool_schemas = [
+                ts for ts in tool_schemas 
+                if ts.get("function", {}).get("name") in required_tool_names
+            ]
+        else:
+            filtered_tool_schemas = tool_schemas
+        
+        # Early exit: if no tools needed, just get direct LLM response
+        if not filtered_tool_schemas:
+            await self._emit("agent.thinking", {
+                "status": "direct_response",
+                "phase": ExecutionPhase.EXECUTING.value,
+            })
+            direct_result = await self._get_direct_response(task, conversation)
+            return {
+                "status": "completed",
+                "response": direct_result,
+                "results": [],
+                "iterations": 0,
+            }
+        
         # Phase 2: Execute — iterative tool-use loop
         result = await self._execute_loop(
-            task, tool_schemas, conversation, workspace,
+            task, filtered_tool_schemas, conversation, workspace,
             session_id, context, plan,
         )
         
@@ -697,6 +726,36 @@ class ManagerAgent:
                 parts.append(f"- {tool}: {error[:200]}")
         
         return "\n".join(parts)
+    
+    async def _get_direct_response(self, task: str, conversation: List[Dict]) -> str:
+        """Get a direct LLM response without tools when task doesn't need them."""
+        if not self.llm:
+            return "Task complete."
+        
+        from project_kernel_runtime.cognition.llm_provider import LLMMessage
+        
+        system_prompt = (
+            "You are a helpful AI assistant. Respond directly to the user's request. "
+            "If it's a greeting, simply greet back. "
+            "If it's a question, answer it. "
+            "If it requires no actions, just respond appropriately. "
+            "Do not use any tools unless absolutely necessary."
+        )
+        
+        messages = [
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=task),
+        ]
+        
+        try:
+            response = await self.llm.complete(
+                messages=messages,
+                tools=None,
+                task_type="auto",
+            )
+            return response.content or "Task complete."
+        except Exception:
+            return "Task complete."
     
     def _delegate_to_swarm(self, task: str, context: Dict) -> Optional[Dict]:
         """
