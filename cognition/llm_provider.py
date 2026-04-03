@@ -81,22 +81,59 @@ class LLMProvider:
     - Rate limiting (configurable RPM)
     """
     
+    # Model selection rules - complex tasks use better models
+    TASK_MODEL_MAP = {
+        "planning": "ollama/llama3.1:8b",        # Planning tasks
+        "execution": "ollama/llama3.1:8b",      # Execution tasks
+        "verification": "ollama/llama3.1:8b",   # Verification tasks
+        "research": "ollama/llama3.1:8b",       # Research
+        "architecture": "ollama/llama3.1:8b",   # Architecture
+        "auto": "ollama/llama3.1:8b",            # Default
+    }
+    
+    # Complex tasks that should use external API if available
+    COMPLEX_TASKS = ["architecture", "research", "planning"]
+    
+    # Default NIM configuration - can be overridden by config
+    DEFAULT_NIM_BASE = "https://integrate.api.nvidia.com/v1"
+    DEFAULT_NIM_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+    
     def __init__(self, config=None):
         self.config = config
         self.usage = UsageStats()
         
-        # Model and provider from config
-        self.active_model = "ollama/qwen2.5-coder:7b-instruct-q4_K_M"
+        # Model and provider from config - default to llama3.1 for chat
+        self.active_model = "ollama/llama3.1:8b"
         self.ollama_base_url = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11500")
         self.model_router: Dict[str, str] = {}
         self._providers: Dict[str, Dict] = {}
         self._rate_limiter = asyncio.Semaphore(60)
+        
+        # NVIDIA NIM support for complex tasks
+        self.nvidia_nim_base = os.environ.get("NVIDIA_NIM_BASE", "")
+        self.nvidia_nim_api_key = os.environ.get("NVIDIA_NIM_API_KEY", "")
+        self.nvidia_nim_enabled = False  # Default to false
+        self.nvidia_nim_models: Dict[str, str] = {}
         
         if config:
             if hasattr(config, 'active_model'):
                 self.active_model = config.active_model
             if hasattr(config, 'model_router'):
                 self.model_router = dict(config.model_router)
+            # Load NIM config from runtime.yaml - handle both dict and object
+            if hasattr(config, 'nvidia_nim'):
+                nim_config = config.nvidia_nim
+                # Handle dict from yaml (has .get()) vs object (has getattr)
+                if isinstance(nim_config, dict):
+                    self.nvidia_nim_enabled = nim_config.get('enabled', False)
+                    self.nvidia_nim_base = os.environ.get("NVIDIA_NIM_BASE") or nim_config.get('base_url', '') or self.DEFAULT_NIM_BASE
+                    self.nvidia_nim_models = nim_config.get('models', {})
+                else:
+                    # Object with attributes
+                    self.nvidia_nim_enabled = getattr(nim_config, 'enabled', False)
+                    self.nvidia_nim_base = os.environ.get("NVIDIA_NIM_BASE") or getattr(nim_config, 'base_url', '') or self.DEFAULT_NIM_BASE
+                    if hasattr(nim_config, 'models'):
+                        self.nvidia_nim_models = dict(nim_config.models)
             if hasattr(config, 'providers'):
                 for p in config.providers:
                     pname = p.name if hasattr(p, 'name') else p.get('name', '')
@@ -108,7 +145,6 @@ class LLMProvider:
                         'enabled': getattr(p, 'enabled', True),
                         'priority': getattr(p, 'priority', 0),
                     }
-                    # If ollama provider has base_url, use it
                     if pname == 'ollama' and self._providers[pname].get('base_url'):
                         self.ollama_base_url = self._providers[pname]['base_url']
         
@@ -116,8 +152,55 @@ class LLMProvider:
         logger.info(f"[LLMProvider] Initialized — model: {self.active_model}, ollama: {self.ollama_base_url}")
     
     def get_model_for_task(self, task_type: str) -> str:
-        """Route task to optimal model via model router."""
-        return self.model_router.get(task_type, self.active_model)
+        """Route task to optimal model - dynamic based on task complexity."""
+        if not task_type:
+            return self.active_model
+        
+        # Use config model_router if available
+        if task_type in self.model_router:
+            model = self.model_router[task_type]
+            # Only prefix with nvidia/ if not already present
+            if model.startswith("nvidia/"):
+                return model
+            # Check if we should route to NIM for complex tasks
+            if task_type in self.COMPLEX_TASKS and self.nvidia_nim_enabled and self.nvidia_nim_base:
+                return f"nvidia/{self._get_nvidia_model_name(task_type)}"
+            return model
+        
+        # Check if we should use NVIDIA NIM for complex tasks
+        if task_type in self.COMPLEX_TASKS and self.nvidia_nim_enabled and self.nvidia_nim_base:
+            model = self._get_nvidia_model_name(task_type)
+            # Don't add prefix if already present
+            if not model.startswith("nvidia/"):
+                return f"nvidia/{model}"
+            return model
+        
+        # Default to TASK_MODEL_MAP
+        return self.TASK_MODEL_MAP.get(task_type, self.active_model)
+    
+    def _get_nvidia_model_name(self, task_type: str) -> str:
+        """Get appropriate NVIDIA NIM model for task type."""
+        # Use configured models if available
+        if self.nvidia_nim_models:
+            return self.nvidia_nim_models.get(task_type, self.DEFAULT_NIM_MODEL)
+        
+        # Default to Nemotron for complex tasks
+        nvidia_models = {
+            "planning": self.DEFAULT_NIM_MODEL,
+            "execution": self.DEFAULT_NIM_MODEL, 
+            "verification": self.DEFAULT_NIM_MODEL,
+            "research": self.DEFAULT_NIM_MODEL,
+            "architecture": self.DEFAULT_NIM_MODEL,
+            "auto": self.DEFAULT_NIM_MODEL,
+        }
+        return nvidia_models.get(task_type, self.DEFAULT_NIM_MODEL)
+    
+    def should_use_external_api(self, task_type: str) -> bool:
+        """Check if task should use external API (NVIDIA, OpenAI, Anthropic)."""
+        if task_type in self.COMPLEX_TASKS:
+            return bool(self.nvidia_nim_base or self._providers.get("openai", {}).get("enabled") or 
+                       self._providers.get("anthropic", {}).get("enabled"))
+        return False
     
     async def complete(
         self,
@@ -315,6 +398,15 @@ class LLMProvider:
             os.environ["OLLAMA_API_BASE"] = self.ollama_base_url
             litellm.api_base = self.ollama_base_url
         
+        # Handle NVIDIA NIM models
+        if model.startswith("nvidia/"):
+            # Use NIM base URL
+            nvidia_base = self.nvidia_nim_base or self.DEFAULT_NIM_BASE
+            os.environ["OPENAI_API_BASE"] = nvidia_base
+            if self.nvidia_nim_api_key:
+                os.environ["OPENAI_API_KEY"] = self.nvidia_nim_api_key
+            litellm.api_base = nvidia_base
+        
         # Set API keys from env vars  
         for pname, pconfig in self._providers.items():
             api_key_env = pconfig.get('api_key_env', '')
@@ -326,6 +418,8 @@ class LLMProvider:
         """Detect which provider a model belongs to."""
         if "ollama" in model.lower():
             return "ollama"
+        if model.startswith("nvidia/"):
+            return "nvidia_nim"
         if any(x in model.lower() for x in ["gpt", "o1", "o3"]):
             return "openai"
         if any(x in model.lower() for x in ["claude", "sonnet", "haiku", "opus"]):
@@ -333,18 +427,28 @@ class LLMProvider:
         return "unknown"
     
     @staticmethod
-    def _messages_to_dicts(messages: List[LLMMessage]) -> List[Dict]:
-        """Convert LLMMessage objects to dict format for litellm."""
+    def _messages_to_dicts(messages: List) -> List[Dict]:
+        """Convert LLMMessage objects or dicts to dict format for litellm."""
         dicts = []
         for msg in messages:
-            d = {"role": msg.role, "content": msg.content}
-            if msg.tool_calls:
-                d["tool_calls"] = msg.tool_calls
-            if msg.tool_call_id:
-                d["tool_call_id"] = msg.tool_call_id
-            if msg.name:
-                d["name"] = msg.name
-            dicts.append(d)
+            if isinstance(msg, dict):
+                d = {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+                if msg.get("tool_calls"):
+                    d["tool_calls"] = msg["tool_calls"]
+                if msg.get("tool_call_id"):
+                    d["tool_call_id"] = msg["tool_call_id"]
+                if msg.get("name"):
+                    d["name"] = msg["name"]
+                dicts.append(d)
+            else:
+                d = {"role": msg.role, "content": msg.content}
+                if msg.tool_calls:
+                    d["tool_calls"] = msg.tool_calls
+                if msg.tool_call_id:
+                    d["tool_call_id"] = msg.tool_call_id
+                if msg.name:
+                    d["name"] = msg.name
+                dicts.append(d)
         return dicts
     
     def _track_usage(self, response: LLMResponse):

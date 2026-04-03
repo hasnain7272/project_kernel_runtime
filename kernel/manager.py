@@ -100,8 +100,8 @@ class ManagerAgent:
         # But ALWAYS use full context - like Claude/Codex/ADK
         tool_schemas = self._get_tool_schemas(available_tools) if available_tools else None
         
-        # Always use full context - LLM receives tools + history + task
-        response = await self._llm_chat(task, tool_schemas, conversation_history)
+        # Always use full context - LLM receives tools + history + task + governance
+        response = await self._llm_chat(task, tool_schemas, conversation_history, context)
         
         # If LLM used tools - decide: simple vs complex execution
         if response.tool_calls:
@@ -144,11 +144,21 @@ class ManagerAgent:
         
         # No tools - return LLM conversational response
         return {"status": "completed", "response": response.content or "Done", "results": {}}
-    
-    async def _llm_chat(self, task: str, tools: List = None, history: List[Dict] = None):
+
+    async def _llm_chat(self, task: str, tools: List = None, history: List[Dict] = None,
+                    context: Dict = None):
         from project_kernel_runtime.cognition.llm_provider import LLMMessage
-        # No system prompt - just tool definitions + task + history
-        messages = [LLMMessage(role="system", content="")]
+        
+        # Build governance context from session
+        ctx = context or {}
+        folders = ctx.get("folders", [])
+        skills = ctx.get("skills", [])
+        mcp = ctx.get("mcp_servers", [])
+        workspace = ctx.get("workspace_path", ".")
+        
+        gov = self._build_env_context(folders, skills, mcp, workspace)
+        
+        messages = [LLMMessage(role="system", content=gov)]
         
         # Add conversation history for context
         if history:
@@ -243,12 +253,46 @@ class ManagerAgent:
         
         return results
     
-    async def _run_tool(self, name: str, args: Dict, workspace: str) -> str:
+    async def _run_tool(self, name: str, args: Dict, workspace: str, allowed_folders: List = None) -> str:
         from .tool_executor import ToolCall, ExecutionContext
         tc = ToolCall(name=name, arguments=args)
-        ctx = ExecutionContext(workspace_path=workspace, enforce_skill_scope=False)
+        # Pass allowed folders for governance - enforce path restrictions
+        folders = allowed_folders or [workspace]
+        ctx = ExecutionContext(
+            workspace_path=workspace,
+            enforce_skill_scope=False,
+            allowed_folders=folders  # GOV: Enforce folder whitelist
+        )
         res = await self.tool_executor.execute(tc, ctx)
         return str(res.output) if res.success else f"Error: {res.error}"
+
+    def _build_env_context(self, folders, skills, mcp_servers, workspace):
+        lines = [
+            "=== AGENT GOVERNANCE (STRICT) ===",
+            f"WORKSPACE: {workspace}"
+        ]
+        if folders:
+            lines.append(f"ALLOWED FOLDERS: {', '.join(folders)}")
+        else:
+            lines.append(f"ALLOWED: {workspace} (default)")
+        
+        if skills:
+            lines.append(f"SKILLS: {', '.join(skills)}")
+        
+        lines.extend([
+            "",
+            "RESTRICTIONS (MUST FOLLOW):",
+            "- NEVER use paths like /home/, /root/, C:\\Windows",
+            "- NEVER use paths OUTSIDE allowed folders above",
+            f"- ONLY use paths that start with: {workspace}",
+            "- If you need access to a new folder, ask user FIRST"
+        ])
+        return "\n".join(lines)
+
+    async def _try_model_fallback(self, task_type):
+        if self.llm and self.llm.should_use_external_api(task_type):
+            return self.llm.get_model_for_task(task_type)
+        return None
 
 
 _manager = None

@@ -4,72 +4,135 @@ A marketplace-embeddable AI coding agent kernel inspired by OpenHands, Aider, Cl
 
 ## Overview
 
-Project Kernel Runtime is a production-grade AI coding agent kernel that provides:
+Project Kernel Runtime is a production-grade AI coding agent kernel with a Coordinator Pattern architecture:
 
-- **Multi-modal deployment**: CLI, Web UI, and MCP server modes
+- **Multi-modal deployment**: Web UI, API Server, and MCP server modes
 - **Governance enforcement**: Policy-based tool execution controls
-- **Task durability**: Persistent task state with recovery
-- **MCP protocol support**: Extensible tool and resource system
-- **Session management**: User context and workspace state
+- **Task durability**: Persistent task state with SQLite storage
+- **MCP protocol support**: Streamable HTTP + WebSocket transports
+- **Session management**: Multi-user context with workspace isolation
+- **Agentic Loop**: Gather → Plan → Act → Verify with Manager-based multi-agent orchestration
 
 ## Architecture
 
 ```
 project_kernel_runtime/
-├── core/                    # Core SDK components
-│   ├── runtime.py          # Configuration management
-│   ├── governance.py       # Policy enforcement
-│   ├── skills_registry.py  # Capability definitions
-│   ├── task_state_machine.py # Durable task execution
-│   ├── session_manager.py  # User context management
-│   ├── orchestrator.py     # Main coordination engine
-│   ├── mcp_client.py       # MCP protocol client
-│   └── mcp_server.py      # MCP protocol server
-├── services/               # API services
-│   └── fastapi_server.py  # HTTP/WebSocket API
-├── ui/                     # User interfaces
-│   └── cli_app.py         # Textual-based CLI
-└── main.py                # Entry point
+├── kernel/                    # Core orchestration and execution engine
+│   ├── orchestrator.py        # Main coordination engine (Coordinator pattern)
+│   ├── manager.py             # Manager-based multi-agent orchestration
+│   ├── task_state_machine.py  # Persistent task execution
+│   ├── tool_executor.py       # Pipeline tool execution with governance
+│   ├── governance.py          # Policy enforcement engine
+│   ├── skills_registry.py     # Capability definitions
+│   ├── session_manager.py     # User context management
+│   ├── workflow_engine.py     # AgentScope-inspired pipelines
+│   ├── swarm.py              # Multi-agent swarm coordination
+│   ├── planner.py            # Mission planning for agentic loops
+│   ├── sandbox.py            # Zero-trust sandbox execution
+│   ├── mcp_bridge.py         # MCP server bridge
+│   └── ...
+├── services/                  # API services layer
+│   ├── fastapi_server.py     # HTTP/WebSocket API gateway
+│   ├── router_agent.py       # Agent execution endpoints
+│   ├── router_mcp.py         # MCP protocol endpoints
+│   ├── router_runtime.py     # Runtime configuration endpoints
+│   ├── ui_websocket.py       # Real-time UI communication
+│   ├── research_api.py       # Research mode endpoints
+│   ├── project_registry.py   # Project folder registry
+│   └── runtime_control.py    # Control plane for jobs
+├── protocols/                 # Protocol implementations
+│   ├── mcp_server.py         # MCP 2026 Streamable HTTP + WebSocket server
+│   ├── mcp_client.py         # MCP client for external tools
+│   ├── mesh_p2p.py           # Peer-to-peer mesh networking (A2A)
+│   └── federated_hub.py      # Federated knowledge sharing
+├── memory/                    # Memory and state management
+│   ├── chroma_store.py       # Vector storage with ChromaDB
+│   └── state_hub.py          # Global state management (SSOT)
+├── data/                      # Persistent storage
+│   ├── tasks.db             # Task persistence
+│   ├── sessions.db          # Session persistence
+│   ├── heartbeat.db         # Scheduled task persistence
+│   ├── credits.db           # Credit tracking
+│   └── mcp_registry.json    # MCP server configurations
+├── runtime.yaml              # Main configuration file
+└── main.py                   # Entry point
 ```
 
 ## Installation
 
 ```bash
 # Install dependencies
-pip install -e .
+pip install -r requirements.txt
 
 # Or install from pyproject.toml
-pip install .
+pip install -e .
 ```
 
 ## Usage
 
-### CLI Mode (Aider-style)
+### Start the Server
 
 ```bash
-# Start CLI interface
-project-kernel cli --user-id myuser --workspace /path/to/project
+# Start FastAPI server with default settings
+python main.py
+
+# Start with custom host/port
+python main.py --host 0.0.0.0 --port 8089
 ```
 
-### Web Server Mode (OpenHands-style)
+### API Endpoints
 
-```bash
-# Start web server
-project-kernel web --host 0.0.0.0 --port 8000
-```
+#### Core Endpoints
+- `GET /health` - Health check
+- `GET /api/ui/bootstrap` - Initial state for frontend IDE
+- `GET /status/full` - Full system status
+- `GET /api/runtime/surfaces` - Available service surfaces
 
-### MCP Server Mode
+#### Session Management
+- `POST /api/agent/sessions` - Create session
+- `GET /api/agent/sessions/{user_id}` - Get session
+- `DELETE /api/agent/sessions/{user_id}` - End session
 
-```bash
-# Start MCP server for tool integration
-project-kernel mcp --host localhost --mcp-port 3000
-```
+#### Task Management
+- `POST /api/agent/tasks` - Create task
+- `POST /api/agent/tasks/{task_id}/execute` - Execute task
+- `GET /api/agent/tasks/{task_id}` - Get task status
+- `POST /api/agent/tasks/{task_id}/stop` - Stop task
 
-### API Server Mode
+#### Agentic Loop
+- `POST /api/agent/execute` - Execute agentic loop (SSE stream)
 
-```bash
-# Start FastAPI server
-project-kernel server --host 0.0.0.0 --port 8000
+#### MCP Protocol
+- `POST /mcp` - MCP Streamable HTTP POST
+- `GET /mcp` - MCP Streamable HTTP GET (SSE stream)
+- `POST /a2a` - A2A JSON-RPC endpoint
+
+#### Configuration
+- `GET /api/runtime/yaml` - Get runtime configuration
+- `POST /api/runtime/yaml` - Update runtime configuration
+- `GET /api/runtime/project/registry` - Project registry
+- `GET /api/runtime/models/status` - LLM provider status
+
+#### Governance & Security
+- `GET /api/runtime/governance/config` - Governance configuration
+- `PUT /api/runtime/governance/config` - Update governance
+- `GET /api/runtime/governance/audit` - Audit log
+- `POST /api/runtime/governance/approvals/{id}` - Resolve approval
+
+#### File Operations
+- `GET /api/runtime/workspace/tree` - File tree explorer
+- `GET /api/runtime/workspace/file` - Read file content
+
+### WebSocket API
+
+Connect to `/ws/ui` for real-time events:
+
+```javascript
+const ws = new WebSocket('ws://localhost:8089/ws/ui');
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    // Handle: task updates, tool execution, state changes
+};
 ```
 
 ## Configuration
@@ -77,91 +140,143 @@ project-kernel server --host 0.0.0.0 --port 8000
 The runtime is configured via `runtime.yaml`:
 
 ```yaml
-mode: development
+version: 2.0.0
+mode: production
+
+# Governance
+
 governance:
   enabled: true
-  audit_log: true
+  default_role: developer
+  require_approval_for:
+    - git_commit
+    - bash_execute
+  policy_matrix:
+    plan:
+      read_only: true
+      write: false
+      execute: true
+    build:
+      read_only: true
+      write: true
+      execute: true
+
+# MCP Protocol
+
 mcp:
   enabled: true
-  server_url: ws://localhost:3000
-skills:
-  core: true
-  blender: false
-  coding: true
+  transport: streamable_http
+  host: 0.0.0.0
+  port: 8090
+
+# LLM Providers
+
+llm:
+  active_model: ollama/llama3.1:8b
+  providers:
+    - name: ollama
+      base_url: http://127.0.0.1:11500
+      enabled: true
+    - name: anthropic
+      api_key_env: ANTHROPIC_API_KEY
+      enabled: false
+
+# Sandbox
+
+sandbox:
+  backend: subprocess
+  docker_image: python:3.11-slim
+  memory_limit_mb: 512
+
+# Features
+
+features:
+  gtm_swarm: true
+  mesh_p2p: true
+  sre_swarm: true
+  predictive: true
+  skill_compiler: true
 ```
 
 ## Core Concepts
 
+### Agentic Loop
+
+The core execution model: Gather → Plan → Act → Verify
+
+- **Manager**: Analyzes tasks and decomposes into sub-tasks
+- **Orchestrator**: Dispatches to specialized agents via ToolExecutor
+- **Event Bus**: All subsystems communicate via publish/subscribe
+
 ### Skills
-Skills define what the agent can do, organized by domain:
-- **Core**: File operations, terminal, git, LSP, error recovery, browser automation
-- **Blender**: Geometry nodes, animation, materials
+
+Skills define capabilities, organized by domain:
+- **Core**: File operations, terminal, git, web, LSP
 - **Coding**: Testing, debugging, refactoring
 
+Skills are loaded from `kernel/skills_registry.py`.
+
 ### Tasks
+
 Durable tasks with state persistence:
-- **Types**: code_generation, code_review, debugging, refactoring, testing, deployment
+- **Types**: code_generation, code_review, debugging, refactoring, testing, deployment, custom
 - **States**: pending, running, paused, completed, failed, cancelled
 - **Steps**: Individual operations with tool requirements
 
+Tasks are stored in `data/tasks.db`.
+
 ### Governance
+
 Policy enforcement at the tool execution layer:
 - **Modes**: plan, review, research, build
 - **Decisions**: allow, deny, require_approval
-- **Audit logging**: All tool executions are logged
+- **Audit logging**: All tool executions logged to SQLite
 
 ### Sessions
+
 User context management:
-- **Workspace state**: Current project and files
-- **Task history**: Recent tasks and commands
+- **Workspace isolation**: Per-session working directories
+- **Task history**: Linked to session
 - **Activity tracking**: File access and command history
 
-## API Reference
+Sessions are stored in `data/sessions.db`.
 
-### REST API Endpoints
+### MCP Protocol
 
-- `GET /health` - Health check
-- `POST /sessions` - Create session
-- `GET /sessions/{user_id}` - Get session info
-- `POST /tasks` - Create task
-- `POST /tasks/{task_id}/execute` - Execute task
-- `GET /tasks/{task_id}` - Get task status
-- `GET /tasks` - List user tasks
-- `POST /tools/call` - Call tool
-- `GET /skills` - Get available skills
+Full MCP 2026 spec implementation:
+- **Streamable HTTP**: POST for requests, GET for SSE streams
+- **WebSocket**: Legacy transport for backward compatibility
+- **Session management**: Mcp-Session-Id headers
+- **Resumability**: Last-Event-ID for reconnection
+- **Protocol versions**: 2024-11-05 and 2025-03-26
 
-### WebSocket API
+### Tool Execution Pipeline
 
-Real-time communication for task updates and tool execution.
+All tools execute through `ToolExecutor`:
+1. **Validation**: Input schema validation
+2. **Governance**: Policy enforcement
+3. **Sandbox**: Isolated execution
+4. **Audit**: Log execution
+5. **Event**: Publish result to EventBus
 
 ## Development
 
-### Testing
+### Running Tests
 
 ```bash
-# Run tests
-python test_kernel.py
+# Run smoke tests
+python verify_runtime_smoke.py
+
+# Run specific test
+python test_file_ops.py
 ```
 
-### Adding New Skills
+### Project Structure Notes
 
-1. Define skill in `skills_registry.py`
-2. Implement tools in MCP server or direct execution
-3. Update governance policies if needed
-
-### Adding New UI Modes
-
-1. Create new UI module in `ui/`
-2. Update `main.py` to support new mode
-3. Implement orchestrator integration
-
-## Inspiration & References
-
-- **OpenHands**: Modular SDK architecture, REST API design
-- **Aider**: Terminal UI, git integration, AST parsing
-- **Claude Code**: MCP protocol, tool extensibility
-- **Cursor**: Autonomy controls, governance patterns
-- **Windsurf**: MCP tools, agent coordination
+- **Coordinator Pattern**: Orchestrator uses lazy initialization via `@cached_property`
+- **Event-Driven**: All communication through EventBus
+- **Zero-Trust**: Sandboxed tool execution
+- **Multi-Agent**: Manager-based task decomposition
 
 ## License
 
