@@ -7,7 +7,7 @@
  */
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { Send, Sparkles } from 'lucide-react';
-import { apiClient } from '@/api/client';
+import { apiClient, getTenantId } from '@/api/client';
 import { useSessionStore } from '@/store/sessionStore';
 import { useTaskStore } from '@/store/taskStore';
 import { useToastStore } from '@/components/Toast';
@@ -60,7 +60,7 @@ export function ChatPane() {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/v1/tasks/${taskId}/stream`;
+    const wsUrl = `${protocol}//${window.location.host}/api/v1/tasks/${taskId}/stream?tenant_id=${encodeURIComponent(getTenantId())}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

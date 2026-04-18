@@ -1,12 +1,20 @@
 /**
- * API Client Configuration
- * Direct bridge to FastAPI Gateway
+ * API client configuration.
  */
 
 interface ApiResponse<T> {
   data?: T;
   error?: string;
   status: 'accepted' | 'success' | 'error';
+}
+
+export function getTenantId() {
+  let tenantId = localStorage.getItem('tenant_id');
+  if (!tenantId) {
+    tenantId = 'usr_' + Math.random().toString(36).slice(2, 11);
+    localStorage.setItem('tenant_id', tenantId);
+  }
+  return tenantId;
 }
 
 async function request<T>(
@@ -19,14 +27,7 @@ async function request<T>(
       method,
       headers: {
         'Content-Type': 'application/json',
-        'X-Tenant-Id': (() => {
-          let tId = localStorage.getItem('tenant_id');
-          if (!tId) {
-            tId = 'usr_' + Math.random().toString(36).slice(2, 11);
-            localStorage.setItem('tenant_id', tId);
-          }
-          return tId;
-        })(),
+        'X-Tenant-Id': getTenantId(),
       },
     };
     if (payload !== undefined) {

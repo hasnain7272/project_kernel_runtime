@@ -1,24 +1,27 @@
-# crypto.py
-
 """
-Security and Encryption core logic.
-Provides symmetric encryption for sensitive data like API keys (BYOK).
+Security and encryption helpers.
 """
-import os
-import base64
 import logging
+import os
+from pathlib import Path
+
 from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
+_KEY_FILE = Path.cwd() / ".runtime_secret.key"
 
-# Try to get the key from environment, fallback to a deterministic key for local dev
-# In production, THIS MUST BE SET EXPLICITLY
-_raw_key = os.environ.get("APP_SECRET_KEY")
-if not _raw_key:
-    logger.warning("APP_SECRET_KEY not set. Using fallback dev key. DO NOT USE IN PROD.")
-    # Fallback needs to be a valid 32-byte url-safe base64-encoded string
-    _raw_key = base64.urlsafe_b64encode(b"0" * 32).decode("utf-8")
 
+def _load_or_create_local_key() -> str:
+    if _KEY_FILE.exists():
+        return _KEY_FILE.read_text(encoding="utf-8").strip()
+
+    key = Fernet.generate_key().decode("utf-8")
+    _KEY_FILE.write_text(key, encoding="utf-8")
+    logger.warning(f"APP_SECRET_KEY not set. Generated local runtime key at {_KEY_FILE}.")
+    return key
+
+
+_raw_key = os.environ.get("APP_SECRET_KEY") or _load_or_create_local_key()
 _fernet = Fernet(_raw_key)
 
 
@@ -33,7 +36,6 @@ def decrypt_string(encrypted_data: str) -> str:
         return encrypted_data
     try:
         return _fernet.decrypt(encrypted_data.encode("utf-8")).decode("utf-8")
-    except Exception as e:
-        logger.error(f"Decryption failed: {e}")
-        # Return fallback or empty if decryption fails to avoid crashing
+    except Exception as exc:
+        logger.error(f"Decryption failed: {exc}")
         return ""

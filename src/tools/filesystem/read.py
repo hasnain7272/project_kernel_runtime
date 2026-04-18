@@ -1,12 +1,15 @@
 """
-Read File Tool
+Read file tool.
 """
 import os
-import aiofiles
 from typing import Any, Dict
 
-from src.tools.core.base import BaseTool, ToolParameter
+import aiofiles
+
 from src.domain.exceptions import ToolExecutionError
+from src.infrastructure.runtime.paths import resolve_workspace_path
+from src.tools.core.base import BaseTool, ToolParameter
+
 
 class ReadFileTool(BaseTool):
     name = "read_file"
@@ -17,23 +20,21 @@ class ReadFileTool(BaseTool):
     requires_sandbox = False
 
     async def execute(self, session_id: str, filepath: str, **kwargs) -> Dict[str, Any]:
-        """Reads file asynchronously without blocking the event loop."""
         try:
-            # Note: Path traversal checks should be managed by the Governance Engine 
-            # injected above this layer, keeping this tool purely focused on execution.
-            if not os.path.exists(filepath):
-                 return {"success": False, "error": f"File not found: {filepath}"}
-                 
-            async with aiofiles.open(filepath, mode='r', encoding='utf-8') as f:
+            resolved_path = str(resolve_workspace_path(filepath))
+            if not os.path.exists(resolved_path):
+                return {"success": False, "error": f"File not found: {resolved_path}"}
+
+            async with aiofiles.open(resolved_path, mode="r", encoding="utf-8") as f:
                 content = await f.read()
-                
+
             return {
                 "success": True,
                 "content": content,
                 "lines": len(content.splitlines()),
-                "filepath": os.path.abspath(filepath)
+                "filepath": resolved_path,
             }
         except UnicodeDecodeError:
             return {"success": False, "error": f"File provides binary data or non-UTF-8 content: {filepath}"}
-        except Exception as e:
-            raise ToolExecutionError(str(e), self.name)
+        except Exception as exc:
+            raise ToolExecutionError(str(exc), self.name) from exc

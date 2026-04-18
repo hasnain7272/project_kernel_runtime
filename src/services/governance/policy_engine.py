@@ -1,40 +1,38 @@
 """
-Governance Policy Engine
+Governance policy engine.
 """
 import logging
-from typing import Dict, Any
+from typing import Any, Dict
 
 from src.domain.exceptions import GovernanceDeniedError
+from src.infrastructure.runtime.paths import resolve_workspace_path
 
 logger = logging.getLogger(__name__)
 
+
 class PolicyEngine:
-    """Stateless engine to audit and validate actions against session roles."""
-    
     @staticmethod
     def assert_action_allowed(session, tool_name: str, kwargs: Dict[str, Any]):
-        """
-        Validates if the current session role is allowed to execute the requested tool.
-        Throws GovernanceDeniedError if prohibited.
-        """
-        # Admin Role: Everything allowed
         if session.user_role == "admin":
             return
-            
-        # Hard denylist for standard developers inside the sandbox
-        prohibited_commands = ["rm -rf /", "mkfs", "dd if=/dev/zero"]
-        
+
+        prohibited_commands = [
+            "rm -rf /", "mkfs", "dd if=/dev/zero", "shutdown", "reboot",
+            "format c:", "del /f /s /q c:", "takeown", "icacls",
+        ]
+
         if tool_name == "bash_execute":
             cmd = kwargs.get("command", "").lower()
             for prohibited in prohibited_commands:
                 if prohibited in cmd:
-                    logger.warning(f"Governance BLOCKED malicious command: {cmd}")
-                    raise GovernanceDeniedError(
-                        f"Command '{cmd}' is prohibited by safety policies."
-                    )
-        
-        # Reader role cannot write files
+                    logger.warning(f"Governance blocked malicious command: {cmd}")
+                    raise GovernanceDeniedError(f"Command '{cmd}' is prohibited by safety policies.")
+            resolve_workspace_path(kwargs.get("working_dir", "."))
+
+        if tool_name in {"read_file", "write_file"}:
+            resolve_workspace_path(kwargs.get("filepath"))
+
         if session.user_role == "reader" and "write" in tool_name:
-             raise GovernanceDeniedError(
-                 f"Role 'reader' cannot execute modifying tool '{tool_name}'."
-             )
+            raise GovernanceDeniedError(
+                f"Role 'reader' cannot execute modifying tool '{tool_name}'."
+            )

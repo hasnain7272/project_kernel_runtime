@@ -13,10 +13,10 @@ RUN apt-get update \
 COPY requirements.txt /app/
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Copy the actual source tree
 COPY ./src /app/src
+COPY ./main.py /app/main.py
+COPY ./ui /app/ui
 
 EXPOSE 8089
 
-CMD ["python", "-m", "uvicorn", "src.api.fastapi_gateway:app", \
-     "--host", "0.0.0.0", "--port", "8089", "--workers", "2"]
+CMD ["python", "-m", "uvicorn", "src.api.fastapi_gateway:app", "--host", "0.0.0.0", "--port", "8089", "--workers", "2"]

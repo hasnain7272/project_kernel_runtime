@@ -1,7 +1,6 @@
 version: "3.8"
 
 services:
-  # ── PostgreSQL ──
   postgres:
     image: postgres:16-alpine
     container_name: ag-postgres
@@ -21,7 +20,6 @@ services:
       interval: 5s
       retries: 5
 
-  # ── Redis ──
   redis:
     image: redis:7-alpine
     container_name: ag-redis
@@ -35,7 +33,6 @@ services:
       interval: 5s
       retries: 5
 
-  # ── API Gateway ──
   api:
     build:
       context: .
@@ -47,6 +44,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://antigravity:${PG_PASSWORD:-ag_local_dev}@postgres:5432/kernel
       REDIS_URL: redis://redis:6379/0
+      WORKSPACE_ROOT: /workspace
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
@@ -56,8 +54,32 @@ services:
         condition: service_healthy
     networks:
       - ag-net
+    volumes:
+      - ${WORKSPACE_ROOT:-./workspace}:/workspace
 
-  # ── Sandbox Container ──
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ag-worker
+    restart: unless-stopped
+    command: ["python", "-m", "src.services.agent_loop.worker_main"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://antigravity:${PG_PASSWORD:-ag_local_dev}@postgres:5432/kernel
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_ROOT: /workspace
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ag-net
+    volumes:
+      - ${WORKSPACE_ROOT:-./workspace}:/workspace
+
   sandbox:
     image: python:3.11-slim
     container_name: ag-sandbox

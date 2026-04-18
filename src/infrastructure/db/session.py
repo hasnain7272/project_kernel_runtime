@@ -22,7 +22,26 @@ DATABASE_URL = os.environ.get(
     "sqlite+aiosqlite:///./kernel.db",
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+# Production-grade pool configuration
+_pool_config = {
+    "pool_size": 20,           
+    "max_overflow": 30,       
+    "pool_timeout": 30,       
+    "pool_recycle": 1800,     
+    "pool_pre_ping": True,   
+}
+
+# Only apply pool config for PostgreSQL (not SQLite)
+_is_postgres = "postgresql" in DATABASE_URL.lower()
+engine_kwargs = {"echo": False}
+
+if _is_postgres:
+    engine_kwargs.update(_pool_config)
+    logger.info(f"[DB] Using PostgreSQL with pool_size=20, max_overflow=30")
+else:
+    logger.warning("[DB] Using SQLite - pool config not applicable")
+
+engine = create_async_engine(DATABASE_URL, **engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
 

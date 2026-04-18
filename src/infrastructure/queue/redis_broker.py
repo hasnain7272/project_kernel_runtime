@@ -1,99 +1,72 @@
-"""
-Event Broker — Redis-backed Pub/Sub with local asyncio fallback.
-
-In production: connects to a real Redis instance.
-Locally (venv): falls back to asyncio queues identically.
-Controlled by the REDIS_URL environment variable.
-"""
 import asyncio
+import base64
 import json
 import logging
 import os
 from typing import Any, Callable, Dict, Optional
 
-logger = logging.getLogger(__name__)
+from .redis_streams_broker import get_streams_broker
 
+logger = logging.getLogger(__name__)
 REDIS_URL = os.environ.get("REDIS_URL", "")
 
-# ──────────────────────────────────────────────────
-# Redis-backed implementation
-# ──────────────────────────────────────────────────
-
-class RedisBroker:
-    """Production broker using redis.asyncio pub/sub."""
-
+class RedisPubSubBroker:
+    """Legacy-compatible PubSub broker for ephemeral UI logs."""
     def __init__(self, url: str):
         self.url = url
         self._redis = None
-        self._pubsub = None
 
     async def _get_client(self):
         if self._redis is None:
             import redis.asyncio as aioredis
-            self._redis = aioredis.from_url(
-                self.url, decode_responses=True
-            )
+            self._redis = aioredis.from_url(self.url, decode_responses=True)
         return self._redis
 
-    async def publish(self, channel: str, message: Dict[str, Any]):
+    async def publish(self, channel: str, message: Any):
         client = await self._get_client()
-        await client.publish(channel, json.dumps(message))
-        logger.debug(f"[Redis] Published -> {channel}")
+        payload = json.dumps({"data": message}) if not isinstance(message, (str, bytes)) else message
+        if isinstance(payload, bytes):
+            payload = payload.decode('utf-8', errors='replace')
+        await client.publish(channel, payload)
 
-    async def subscribe(
-        self, channel: str, callback: Callable[[Dict], Any]
-    ):
+    async def iter_messages(self, channel: str):
         client = await self._get_client()
         pubsub = client.pubsub()
         await pubsub.subscribe(channel)
-        async for raw in pubsub.listen():
-            if raw["type"] == "message":
-                data = json.loads(raw["data"])
-                await callback(data)
+        try:
+            async for raw in pubsub.listen():
+                if raw["type"] == "message":
+                    data = raw["data"]
+                    try:
+                        yield json.loads(data)["data"]
+                    except:
+                        yield data
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.close()
 
-
-# ──────────────────────────────────────────────────
-# Local asyncio fallback (venv-only, no Redis needed)
-# ──────────────────────────────────────────────────
-
-class LocalBroker:
-    """Thread-safe in-process broker for local dev without Redis."""
-
+class LocalPubSubBroker:
+    """In-memory fallback for PubSub."""
     def __init__(self):
-        self._subscribers: Dict[str, list[Callable]] = {}
         self._queues: Dict[str, asyncio.Queue] = {}
 
-    async def publish(self, channel: str, message: Dict[str, Any]):
-        logger.debug(f"[Local] Published -> {channel}")
-        if channel in self._subscribers:
-            for cb in self._subscribers[channel]:
-                asyncio.create_task(cb(message))
+    async def publish(self, channel: str, message: Any):
         if channel in self._queues:
             await self._queues[channel].put(message)
-
-    def subscribe_sync(self, channel: str, callback: Callable):
-        self._subscribers.setdefault(channel, []).append(callback)
 
     async def get_queue(self, channel: str) -> asyncio.Queue:
         if channel not in self._queues:
             self._queues[channel] = asyncio.Queue()
         return self._queues[channel]
 
-
-# ──────────────────────────────────────────────────
-# Factory — single broker instance per process
-# ──────────────────────────────────────────────────
-
-_broker_instance = None
-
+_pubsub_instance = None
 
 def get_broker():
-    global _broker_instance
-    if _broker_instance is None:
-        if REDIS_URL:
-            logger.info(f"[Broker] Using Redis at {REDIS_URL}")
-            _broker_instance = RedisBroker(REDIS_URL)
-        else:
-            logger.info("[Broker] No REDIS_URL — using local asyncio broker")
-            _broker_instance = LocalBroker()
-    return _broker_instance
+    """Returns the PubSub broker for transient logging."""
+    global _pubsub_instance
+    if _pubsub_instance is None:
+        _pubsub_instance = RedisPubSubBroker(REDIS_URL) if REDIS_URL else LocalPubSubBroker()
+    return _pubsub_instance
+
+async def get_broker_async():
+    return get_broker()

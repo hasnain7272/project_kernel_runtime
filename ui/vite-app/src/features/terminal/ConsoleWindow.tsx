@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { getTenantId } from '@/api/client';
 import { useTaskStore } from '@/store/taskStore';
 
 export function ConsoleWindow() {
@@ -45,7 +46,7 @@ export function ConsoleWindow() {
     
     // Connect relative to current window location protocol/host
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${protocol}://${window.location.hostname}:8089/api/v1/tasks/${activeTaskId}/stream`;
+    const wsUrl = `${protocol}://${window.location.host}/api/v1/tasks/${activeTaskId}/stream?tenant_id=${encodeURIComponent(getTenantId())}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {

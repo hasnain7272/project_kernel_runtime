@@ -1,54 +1,70 @@
 """
-Kernel API Gateway — Stateless Control Plane Entrypoint
-
-Bootstraps the DB, mounts routers, and in local mode
-registers both BrainWorker and ToolWorker as asyncio subscribers.
+Kernel API gateway.
 """
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi import HTTPException, status
 
-from src.infrastructure.db.session import init_db, AsyncSessionLocal
-from src.infrastructure.queue.redis_broker import get_broker
+from src.api.rest.routers import chat, sessions, tasks, workspace
+from src.infrastructure.db.session import AsyncSessionLocal, init_db
+from src.infrastructure.runtime.config import APP_VERSION, ALLOW_ANON_LOCAL
 from src.services.agent_loop.brain import BrainWorker
 from src.services.agent_loop.tool_worker import ToolWorker
-from src.api.rest.routers import tasks, sessions, chat, workspace
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gateway")
 
+_rate_limit_storage = {}
+_rate_limit_config = {
+    "requests_per_minute": 60,
+    "requests_per_hour": 500,
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize DB (Alembic should replace this eventually)
     await init_db()
-    broker = get_broker()
-    brain = BrainWorker()
-    tool_worker = ToolWorker()
-
-    if hasattr(broker, "subscribe_sync"):
-        # Local venv mode — both workers run as async callbacks
-
-        async def on_task_event(event):
-            async with AsyncSessionLocal() as db:
-                await brain.process_task_event(event, db)
-
-        async def on_tool_event(event):
-            async with AsyncSessionLocal() as db:
-                await tool_worker.process_tool_event(event, db)
-
-        broker.subscribe_sync("task_queue", on_task_event)
-        broker.subscribe_sync("execution_queue", on_tool_event)
-        logger.info("Local worker topology: brain + tool_worker ✓")
-
+    
+    # Initialize Otel tracing
+    from src.infrastructure.observability.tracing import instrument_fastapi
+    instrument_fastapi(app)
+    
+    # Hybrid Mode: Launch the worker as a background task in the same process
+    # for easy local development, while maintaining the distributed stream architecture.
+    hybrid_mode = os.environ.get("HYBRID_MODE", "true").lower() == "true"
+    worker_task = None
+    
+    if hybrid_mode:
+        from src.services.agent_loop.worker_main import start_worker
+        logger.info("🚀 Gateway starting in HYBRID MODE (API + Worker)")
+        worker_task = asyncio.create_task(start_worker(init_database=False))
+    else:
+        logger.info("📡 Gateway starting in STATELESS MODE (API only)")
+    
     yield
+    
+    if worker_task:
+        logger.info("Shutting down background worker...")
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+            
     logger.info("Gateway shutting down.")
 
 
 app = FastAPI(
     title="Antigravity Runtime",
-    version="3.0.0",
+    version=APP_VERSION,
     docs_url="/api/docs",
     lifespan=lifespan,
 )
@@ -69,20 +85,13 @@ app.include_router(workspace.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "3.0.0"}
+    return {"status": "ok", "version": APP_VERSION}
 
-# --- Static File Serving (Unity Deployment) ---
-import os
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi import Request
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "../..", "ui", "vite-app", "dist")
-
 if os.path.exists(STATIC_DIR):
     app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
 
-    # Catch-all for SPA routing (must be last!)
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str):
         if full_path.startswith("api/"):

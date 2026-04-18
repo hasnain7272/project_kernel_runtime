@@ -12,7 +12,8 @@ from typing import Dict, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.infrastructure.queue.redis_broker import get_broker
+from src.infrastructure.queue.redis_streams_broker import get_streams_broker
+from src.infrastructure.observability.tracing import traced
 from src.services.memory.context_builder import persist_message
 from src.services.governance.policy_engine import PolicyEngine
 from src.services.tool_execution.router import ToolExecutionRouter
@@ -27,15 +28,17 @@ class ToolWorker:
     def __init__(self):
         self.router = ToolExecutionRouter()
 
+    @traced("tool_worker.process_tool_event")
     async def process_tool_event(
         self, event: Dict[str, Any], db: AsyncSession
     ):
         task_id = event.get("task_id")
         session_id = event.get("session_id")
+        trace_id = event.get("trace_id")
         tool_spec = event.get("tool", {})
         tool_name = tool_spec.get("name", "")
         tool_args = tool_spec.get("args", {})
-        broker = get_broker()
+        broker = await get_streams_broker()
 
         logger.info(f"[ToolWorker] Executing: {tool_name}")
 
@@ -59,7 +62,7 @@ class ToolWorker:
                 task_id=task_id,
             )
             await db.commit()
-            await _re_trigger_brain(broker, task_id, session_id)
+            await _re_trigger_brain(broker, task_id, session_id, trace_id)
             return
 
         # 2. Execute through the sandboxed router
@@ -87,14 +90,14 @@ class ToolWorker:
         logger.info(f"[ToolWorker] Result persisted. Re-triggering brain.")
 
         # 4. Re-trigger brain → this closes the ReAct loop
-        await _re_trigger_brain(broker, task_id, session_id)
+        await _re_trigger_brain(broker, task_id, session_id, trace_id)
 
 
-async def _re_trigger_brain(broker, task_id: str, session_id: str):
+async def _re_trigger_brain(broker, task_id: str, session_id: str, trace_id: str = None):
     """Emit a new AGENT_THINK so the brain re-evaluates with tool results."""
     await broker.publish("task_queue", {
         "event_type": "AGENT_THINK",
         "task_id": task_id,
         "session_id": session_id,
         "description": "",  # Empty — context comes from DB now
-    })
+    }, trace_id=trace_id)

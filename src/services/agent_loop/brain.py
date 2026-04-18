@@ -19,9 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.llm.litellm_client import LLMClient
-from src.infrastructure.queue.redis_broker import get_broker
+from src.infrastructure.queue.redis_streams_broker import get_streams_broker
+from src.infrastructure.observability.tracing import traced, create_task_span
 from src.infrastructure.db.models.task_model import TaskModel
 from src.infrastructure.db.models.session_model import SessionModel
+from src.infrastructure.resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
 from src.services.memory.context_builder import (
     build_llm_context,
     persist_message,
@@ -29,8 +31,15 @@ from src.services.memory.context_builder import (
 
 logger = logging.getLogger(__name__)
 
-# Tool class registry is now centralized dynamically
 from src.tools.registry import get_all_tool_schemas
+
+_broker = None
+
+async def _get_broker():
+    global _broker
+    if _broker is None:
+        _broker = await get_streams_broker()
+    return _broker
 
 def _extract_heuristic_tool_calls(text: str) -> List[Dict[str, Any]]:
     """
@@ -178,33 +187,57 @@ async def _load_session_llm_config(db: AsyncSession, session_id: str) -> Dict[st
 class BrainWorker:
     def __init__(self):
         self.llm = LLMClient()
+        self._circuit_breaker = CircuitBreaker(
+            "llm-api",
+            CircuitBreakerConfig(
+                failure_threshold=5,
+                success_threshold=2,
+                timeout=30.0,
+            )
+        )
 
+    @traced("brain.process_task_event")
     async def process_task_event(
         self, event: Dict[str, Any], db: AsyncSession
     ):
         task_id = event.get("task_id")
         session_id = event.get("session_id")
         description = event.get("description", "")
-        broker = get_broker()
+        trace_id = event.get("trace_id")
+        broker = await _get_broker()
+        
+        from src.infrastructure.observability.tracing import milestones
+        milestones.milestone("Thinking Start", {"task_id": task_id, "session_id": session_id})
 
-        logger.info(f"[Brain] THINK — task={task_id}")
+        logger.info(f"[Brain] {task_id} — Reasoning step initiated in project_kernel_runtime")
 
-        # --- Circuit Breaker ---
+        # --- Circuit Breaker (prevents infinite ReAct loops) ---
         task_result = await db.execute(select(TaskModel).where(TaskModel.id == task_id))
         task = task_result.scalar_one_or_none()
         
+        MAX_ITERATIONS = 50   # Hard limit — enough for complex multi-file tasks
+        WARN_THRESHOLD = 40   # Soft warning — tells agent to wrap up
+        
         if task:
             task.iteration_count += 1
-            if task.iteration_count > 15:
-                logger.warning(f"[Brain] CIRCUIT BREAKER hit for task {task_id}")
-                output = "System halted: Maximum iterations reached. Potential loop detected."
+            
+            if task.iteration_count > MAX_ITERATIONS:
+                logger.warning(f"[Brain] CIRCUIT BREAKER hit for task {task_id} at {task.iteration_count} iterations")
+                output = "⚠️ Maximum iterations reached. Wrapping up to prevent infinite loops. Please start a new message for further work."
                 await persist_message(db, session_id, "assistant", output, task_id=task_id)
+                broker = await _get_broker()
                 await broker.publish(f"task_log:{task_id}", output.encode('utf-8'))
-                await broker.publish("task_resolved", {
-                    "event_type": "TASK_RESOLVED", "task_id": task_id, "session_id": session_id, "output": output,
-                })
+                await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
                 await db.commit()
                 return
+            
+            if task.iteration_count == WARN_THRESHOLD:
+                # Inject a system nudge so the LLM knows to finish up
+                await persist_message(
+                    db, session_id, "system",
+                    f"[SYSTEM] You have used {WARN_THRESHOLD} of {MAX_ITERATIONS} iterations. Wrap up your current task and provide a summary.",
+                    task_id=task_id,
+                )
 
         # Only persist user message on first entry (non-empty description)
         if description.strip():
@@ -257,8 +290,23 @@ class BrainWorker:
 
         logger.info(f"[Brain] LLM config → model={llm_config['model']}, base_url={llm_config.get('base_url', 'auto')}")
 
+        if not await self._circuit_breaker.can_execute():
+            error_msg = "\x1b[38;5;196m[CIRCUIT BREAKER OPEN]\x1b[0m LLM service temporarily unavailable. Please try again later."
+            await broker.publish(f"task_log:{task_id}", error_msg.encode("utf-8"))
+            await persist_message(db, session_id, "assistant", error_msg, task_id=task_id)
+            await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
+            await db.commit()
+            return
+
         try:
-            response = await acompletion(**completion_kwargs)
+            response = await self._circuit_breaker.protected(acompletion)(**completion_kwargs)
+        except CircuitBreakerOpenError:
+            error_msg = "\x1b[38;5;196m[CIRCUIT BREAKER OPEN]\x1b[0m LLM service temporarily unavailable. Please try again later."
+            await broker.publish(f"task_log:{task_id}", error_msg.encode("utf-8"))
+            await persist_message(db, session_id, "assistant", error_msg, task_id=task_id)
+            await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
+            await db.commit()
+            return
         except Exception as llm_err:
             error_text = str(llm_err)
             logger.error(f"[Brain] LLM call failed: {error_text}")
@@ -329,6 +377,9 @@ class BrainWorker:
             
             for tc in combined_calls:
                 await broker.publish(f"task_log:{task_id}", f"\x1b[38;5;220m\r\n[Executing Tool: {tc['function']['name']}]\x1b[0m\r\n".encode("utf-8"))
+                from src.infrastructure.observability.tracing import milestones
+                milestones.milestone("Action Dispatched", {"tool": tc['function']['name']})
+                
                 await broker.publish("execution_queue", {
                     "event_type": "EXECUTE_TOOL",
                     "task_id": task_id,
@@ -337,7 +388,7 @@ class BrainWorker:
                         "name": tc["function"]["name"],
                         "args": json.loads(tc["function"]["arguments"]),
                     },
-                })
+                }, trace_id=trace_id)
                 logger.info(f"[Brain] → EXECUTE: {tc['function']['name']}")
         else:
             # --- No tool call → final answer ---
@@ -349,9 +400,11 @@ class BrainWorker:
                 "task_id": task_id,
                 "session_id": session_id,
                 "output": full_content,
-            })
+            }, trace_id=trace_id)
             # Also notify the websocket to close gracefully
             await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
-            logger.info("[Brain] Task resolved.")
+            from src.infrastructure.observability.tracing import milestones
+            milestones.milestone("Task Resolved", {"task_id": task_id})
+            logger.info("[Brain] Task resolved in project_kernel_runtime.")
 
         await db.commit()

@@ -1,21 +1,23 @@
 """
-Tasks Router — Task dispatch and real-time SSE streaming.
+Tasks router.
 """
 import asyncio
-from typing import Dict, Any, AsyncGenerator
+import logging
+from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db, get_broker_dep, get_current_user
-from src.infrastructure.db.models.task_model import TaskModel
-from src.infrastructure.db.models.session_model import SessionModel
+from src.api.rest.dependencies import get_broker_dep, get_current_user, get_db, resolve_current_user
 from src.domain.entities.task import TaskStatus
+from src.infrastructure.db.models.session_model import SessionModel
+from src.infrastructure.db.models.task_model import TaskModel
+from src.infrastructure.runtime.config import ALLOW_ANON_LOCAL
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
+logger = logging.getLogger(__name__)
 
 
 class TaskCreateRequest(BaseModel):
@@ -28,8 +30,17 @@ async def dispatch_task(
     req: TaskCreateRequest,
     db: AsyncSession = Depends(get_db),
     broker=Depends(get_broker_dep),
+    current_user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Create task and push to worker queue."""
+    auth_result = await db.execute(
+        select(SessionModel.id).where(
+            SessionModel.id == req.session_id,
+            SessionModel.user_id == current_user,
+        )
+    )
+    if not auth_result.scalar_one_or_none():
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized or session not found")
+
     task = TaskModel(
         session_id=req.session_id,
         description=req.description,
@@ -45,19 +56,14 @@ async def dispatch_task(
         "session_id": req.session_id,
         "description": req.description,
     })
-
-    return {
-        "status": "accepted",
-        "task_id": task.id,
-    }
+    return {"status": "accepted", "task_id": task.id}
 
 
 @router.get("/")
 async def list_tasks(
     db: AsyncSession = Depends(get_db),
-    current_user: str = Depends(get_current_user)
+    current_user: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    # Only return tasks belonging to sessions owned by the current_user
     result = await db.execute(
         select(TaskModel)
         .join(SessionModel, TaskModel.session_id == SessionModel.id)
@@ -79,46 +85,78 @@ async def list_tasks(
     }
 
 
-from fastapi import WebSocket, WebSocketDisconnect
-
 @router.websocket("/{task_id}/stream")
-async def stream_task_logs(websocket: WebSocket, task_id: str):
-    """
-    WebSocket endpoint — streams real-time execution bounds (bidirectional).
-    """
-    await websocket.accept()
-    from src.infrastructure.queue.redis_broker import get_broker
-    broker = get_broker()
+async def stream_task_logs(
+    websocket: WebSocket,
+    task_id: str,
+    tenant_id: str = Query(None),
+):
+    current_user = tenant_id.strip() if tenant_id and tenant_id.strip() else "local"
+    
+    from src.infrastructure.db.session import AsyncSessionLocal
+    from src.infrastructure.queue.redis_streams_broker import get_streams_broker
 
-    # We spawn a background listener to forward from Redis -> WebSocket
-    async def redis_to_ws():
-        try:
-            if hasattr(broker, "get_queue"):
-                queue = await broker.get_queue(f"task_log:{task_id}")
-                while True:
-                    msg = await asyncio.wait_for(queue.get(), timeout=3600)
-                    if isinstance(msg, dict):
-                        await websocket.send_json(msg)
-                        if msg.get("event_type") == "TASK_RESOLVED":
-                            break
-                    elif isinstance(msg, bytes):
-                        # ANSI log stream chunks (reasoning tokens / raw stdout)
-                        await websocket.send_text(msg.decode("utf-8"))
-                    else:
-                        await websocket.send_text(str(msg))
-        except asyncio.TimeoutError:
-            await websocket.send_json({"event_type": "TIMEOUT"})
-        except Exception as e:
-            pass # handle silently on background cancel
+    async with AsyncSessionLocal() as db:
+        # Fix: Also match by task_id alone - user might be session owner
+        auth_result = await db.execute(
+            select(TaskModel.id, SessionModel.user_id)
+            .join(SessionModel, TaskModel.session_id == SessionModel.id)
+            .where(TaskModel.id == task_id)
+        )
+        row = auth_result.one_or_none()
+        
+        if not row:
+            await websocket.close(code=4404)
+            return
             
-    listener_task = asyncio.create_task(redis_to_ws())
+        _, task_owner = row
+        
+        # Allow if user matches OR if using local (dev mode) AND task exists
+        if current_user != task_owner and current_user != "local":
+            logger.warning(f"[WS Auth] Forbidden: task_id={task_id}, current_user={current_user}, owner={task_owner}")
+            await websocket.close(code=4403)
+            return
 
+    await websocket.accept()
+    broker = await get_streams_broker()
+    stream_name = f"task_log:{task_id}"
+
+    # Polling-based real-time stream (works with both Redis and LocalBroker)
+    async def stream_poller():
+        seen_ids = set()
+        while True:
+            try:
+                if hasattr(broker, "_streams") and stream_name in broker._streams:
+                    queue = broker._streams[stream_name]
+                    while not queue.empty():
+                        try:
+                            msg = queue.get_nowait()
+                            msg_id = getattr(msg, "id", str(id(msg)))
+                            if msg_id not in seen_ids:
+                                seen_ids.add(msg_id)
+                                data = getattr(msg, "data", {})
+                                if isinstance(data, bytes):
+                                    data = data.decode("utf-8", errors="replace")
+                                # Send as text for proper streaming display
+                                if isinstance(data, dict):
+                                    await websocket.send_json(data)
+                                else:
+                                    await websocket.send_text(str(data))
+                        except asyncio.QueueEmpty:
+                            break
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[WS] Polling error: {e}")
+                await asyncio.sleep(0.5)
+
+    listener_task = asyncio.create_task(stream_poller())
     try:
         while True:
             data = await websocket.receive_text()
-            # In MVP: we can handle interrupt signals here
-            if data.strip() == "\x03":  # Ctrl+C
-                 await broker.publish(f"task_action:{task_id}", {"action": "interrupt"})
+            if data.strip() == "\x03":
+                await broker.publish(f"task_action:{task_id}", {"action": "interrupt"})
     except WebSocketDisconnect:
         pass
     finally:

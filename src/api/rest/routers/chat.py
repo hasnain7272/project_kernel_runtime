@@ -7,9 +7,8 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import HTTPException
 
-from src.api.rest.dependencies import get_db, get_broker_dep, get_current_user
+from src.api.rest.dependencies import get_db, get_broker_dep, get_current_user, check_rate_limit
 from src.infrastructure.db.models.task_model import TaskModel
 from src.infrastructure.db.models.message_model import MessageModel
 from src.infrastructure.db.models.session_model import SessionModel
@@ -34,6 +33,8 @@ async def send_chat_message(
     Accepts a user message, creates a task, and dispatches
     it to the brain worker via the event queue. Ensure session belongs to user.
     """
+    await check_rate_limit(current_user)
+    
     auth_check = await db.execute(
         select(SessionModel.id).where(
             SessionModel.id == req.session_id,

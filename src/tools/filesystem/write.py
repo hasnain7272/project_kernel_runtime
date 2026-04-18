@@ -1,12 +1,15 @@
 """
-Write File Tool
+Write file tool.
 """
 import os
-import aiofiles
 from typing import Any, Dict
 
-from src.tools.core.base import BaseTool, ToolParameter
+import aiofiles
+
 from src.domain.exceptions import ToolExecutionError
+from src.infrastructure.runtime.paths import resolve_workspace_path
+from src.tools.core.base import BaseTool, ToolParameter
+
 
 class WriteFileTool(BaseTool):
     name = "write_file"
@@ -19,15 +22,15 @@ class WriteFileTool(BaseTool):
 
     async def execute(self, session_id: str, filepath: str, content: str, **kwargs) -> Dict[str, Any]:
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-            
-            async with aiofiles.open(filepath, mode='w', encoding='utf-8') as f:
+            resolved_path = str(resolve_workspace_path(filepath))
+            os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
+            async with aiofiles.open(resolved_path, mode="w", encoding="utf-8") as f:
                 await f.write(content)
-                
+
             return {
                 "success": True,
-                "filepath": os.path.abspath(filepath),
-                "bytes_written": len(content.encode('utf-8'))
+                "filepath": resolved_path,
+                "bytes_written": len(content.encode("utf-8")),
             }
-        except Exception as e:
-            raise ToolExecutionError(str(e), self.name)
+        except Exception as exc:
+            raise ToolExecutionError(str(exc), self.name) from exc

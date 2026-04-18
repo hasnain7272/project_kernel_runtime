@@ -1,16 +1,18 @@
 """
-Workspace Router — File tree and file content API.
+Workspace router.
 """
 import os
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+
+from src.domain.exceptions import GovernanceDeniedError
+from src.infrastructure.runtime.paths import resolve_workspace_path
 
 router = APIRouter(prefix="/api/v1/workspace", tags=["Workspace"])
 
 
 def _scan_tree(root: str, max_depth: int = 3, depth: int = 0) -> List[Dict]:
-    """Recursively scan a directory with depth limiting."""
     if depth >= max_depth or not os.path.isdir(root):
         return []
 
@@ -44,11 +46,11 @@ async def get_workspace_tree(
     path: str = Query(default="."),
     max_depth: int = Query(default=3, le=5),
 ) -> Dict[str, Any]:
-    abs_path = os.path.abspath(path)
-    return {
-        "workspace": abs_path,
-        "tree": _scan_tree(abs_path, max_depth),
-    }
+    try:
+        abs_path = str(resolve_workspace_path(path))
+    except GovernanceDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"workspace": abs_path, "tree": _scan_tree(abs_path, max_depth)}
 
 
 @router.get("/file")
@@ -56,7 +58,10 @@ async def read_file(
     path: str = Query(...),
     max_bytes: int = Query(default=50000, le=200000),
 ) -> Dict[str, Any]:
-    abs_path = os.path.abspath(path)
+    try:
+        abs_path = str(resolve_workspace_path(path))
+    except GovernanceDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not os.path.isfile(abs_path):
         return {"error": "File not found", "path": abs_path}
     try:
