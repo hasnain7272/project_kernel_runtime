@@ -10,8 +10,9 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db, get_broker_dep
+from src.api.rest.dependencies import get_db, get_broker_dep, get_current_user
 from src.infrastructure.db.models.task_model import TaskModel
+from src.infrastructure.db.models.session_model import SessionModel
 from src.domain.entities.task import TaskStatus
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
@@ -54,9 +55,15 @@ async def dispatch_task(
 @router.get("/")
 async def list_tasks(
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
+    # Only return tasks belonging to sessions owned by the current_user
     result = await db.execute(
-        select(TaskModel).order_by(TaskModel.created_at.desc()).limit(50)
+        select(TaskModel)
+        .join(SessionModel, TaskModel.session_id == SessionModel.id)
+        .where(SessionModel.user_id == current_user)
+        .order_by(TaskModel.created_at.desc())
+        .limit(50)
     )
     rows = result.scalars().all()
     return {

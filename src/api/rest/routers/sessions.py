@@ -9,14 +9,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db
+from src.api.rest.dependencies import get_db, get_current_user
 from src.infrastructure.db.models.session_model import SessionModel
+from src.infrastructure.security.crypto import encrypt_string, decrypt_string
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
 
 class SessionCreateRequest(BaseModel):
-    user_id: str = "local"
     workspace_path: str = "."
     mode: str = "web"
     name: str = "New Session"
@@ -24,11 +24,13 @@ class SessionCreateRequest(BaseModel):
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_session(
-    req: SessionCreateRequest, db: AsyncSession = Depends(get_db)
+    req: SessionCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     session = SessionModel(
         name=req.name,
-        user_id=req.user_id,
+        user_id=current_user,
         workspace_path=req.workspace_path,
         mode=req.mode,
     )
@@ -41,9 +43,13 @@ async def create_session(
 @router.get("/")
 async def list_sessions(
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     result = await db.execute(
-        select(SessionModel).where(SessionModel.is_active == True)
+        select(SessionModel).where(
+            SessionModel.is_active == True,
+            SessionModel.user_id == current_user
+        )
     )
     rows = result.scalars().all()
     return {
@@ -62,10 +68,15 @@ async def list_sessions(
 
 @router.get("/{session_id}")
 async def get_session(
-    session_id: str, db: AsyncSession = Depends(get_db)
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
+        select(SessionModel).where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == current_user
+        )
     )
     session = result.scalar_one_or_none()
     if not session:
@@ -91,9 +102,13 @@ async def rename_session(
     session_id: str,
     req: SessionRenameRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
+        select(SessionModel).where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == current_user
+        )
     )
     session = result.scalar_one_or_none()
     if not session:
@@ -116,13 +131,17 @@ async def update_session_config(
     session_id: str,
     req: SessionConfigRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     BYOK Config — Dynamically update the LLM provider settings for a session.
-    Supports OpenAI, Anthropic, NVIDIA NIM, local Ollama, or any OpenAI-compatible endpoint.
+    Encrypts API Keys before persisting to SQLite/Postgres.
     """
     result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
+        select(SessionModel).where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == current_user
+        )
     )
     session = result.scalar_one_or_none()
     if not session:
@@ -131,6 +150,11 @@ async def update_session_config(
     # Deep-merge incoming config into existing session context
     ctx = dict(session.context or {})
     patch = req.model_dump(exclude_none=True)
+    
+    # Encrypt raw API keys
+    if "api_key" in patch and patch["api_key"]:
+        patch["api_key"] = encrypt_string(patch["api_key"])
+        
     ctx.update(patch)
     session.context = ctx
 
@@ -151,18 +175,24 @@ async def update_session_config(
 async def get_session_config(
     session_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
-    """Returns the current LLM config for a session (never exposes full API key)."""
+    """Returns the current LLM config for a session (decrypts locally, never exposes full API key)."""
     result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
+        select(SessionModel).where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == current_user
+        )
     )
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
 
     ctx = session.context or {}
-    raw_key = ctx.get("api_key", "")
-    masked = f"{raw_key[:8]}...{raw_key[-4:]}" if len(raw_key) > 12 else ("••••••" if raw_key else "")
+    raw_key_enc = ctx.get("api_key", "")
+    decrypted_key = decrypt_string(raw_key_enc) if raw_key_enc else ""
+    
+    masked = f"{decrypted_key[:8]}...{decrypted_key[-4:]}" if len(decrypted_key) > 12 else ("••••••" if decrypted_key else "")
 
     return {
         "model": ctx.get("model", ""),
@@ -174,10 +204,15 @@ async def get_session_config(
 
 @router.delete("/{session_id}")
 async def end_session(
-    session_id: str, db: AsyncSession = Depends(get_db)
+    session_id: str, 
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, str]:
     result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
+        select(SessionModel).where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == current_user
+        )
     )
     session = result.scalar_one_or_none()
     if not session:

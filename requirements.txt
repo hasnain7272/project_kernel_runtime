@@ -19,3 +19,6 @@ aiofiles>=23.2
 
 # HTTP client
 httpx>=0.27,<1.0
+
+# Security (SaaS Hardening)
+cryptography>=41.0

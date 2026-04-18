@@ -17,7 +17,17 @@ async function request<T>(
   try {
     const init: RequestInit = {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Tenant-Id': (() => {
+          let tId = localStorage.getItem('tenant_id');
+          if (!tId) {
+            tId = 'usr_' + Math.random().toString(36).slice(2, 11);
+            localStorage.setItem('tenant_id', tId);
+          }
+          return tId;
+        })(),
+      },
     };
     if (payload !== undefined) {
       init.body = JSON.stringify(payload);

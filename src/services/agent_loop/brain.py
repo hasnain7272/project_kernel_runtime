@@ -12,7 +12,8 @@ Event-driven, single-shot. On each AGENT_THINK event:
 import json
 import logging
 import os
-from typing import Dict, Any
+import re
+from typing import Dict, Any, List
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,22 +29,92 @@ from src.services.memory.context_builder import (
 
 logger = logging.getLogger(__name__)
 
-# Tool class registry — mirrors what ToolWorker uses
-_tool_schemas = None
+# Tool class registry is now centralized dynamically
+from src.tools.registry import get_all_tool_schemas
 
+def _extract_heuristic_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """
+    NemoClaw Hybrid Parser:
+    Extracts embedded JSON action payloads when the LLM outputs tool calls as plaintext.
+    Uses balanced-brace matching instead of greedy regex for reliability.
+    Validates extracted tool names against the actual registry.
+    """
+    calls = []
+    
+    # Get valid tool names from registry to validate against
+    from src.tools.registry import get_tool_names
+    valid_names = set(get_tool_names())
+    
+    # Find all top-level JSON objects using balanced brace matching
+    json_blocks = _find_json_blocks(text)
+    
+    for block in json_blocks:
+        try:
+            parsed = json.loads(block)
+            if not isinstance(parsed, dict):
+                continue
+            actions = parsed.get("actions")
+            if not isinstance(actions, list):
+                continue
+            for act in actions:
+                if not isinstance(act, dict):
+                    continue
+                action_name = act.get("action") or act.get("tool") or act.get("name")
+                if action_name and action_name in valid_names:
+                    args = {k: v for k, v in act.items() if k not in ["action", "tool", "name"]}
+                    calls.append({
+                        "type": "function",
+                        "function": {
+                            "name": action_name,
+                            "arguments": json.dumps(args),
+                        }
+                    })
+                elif action_name:
+                    logger.warning(f"[HeuristicParser] Ignoring unknown tool '{action_name}' from text extraction")
+        except (json.JSONDecodeError, ValueError):
+            continue
+    
+    if calls:
+        logger.info(f"[HeuristicParser] Extracted {len(calls)} tool calls from plaintext")
+    return calls
+
+
+def _find_json_blocks(text: str) -> List[str]:
+    """Extract top-level JSON object strings using balanced brace matching."""
+    blocks = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            start = i
+            in_string = False
+            escape = False
+            for j in range(i, len(text)):
+                ch = text[j]
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\':
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                if not in_string:
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            candidate = text[start:j+1]
+                            if '"actions"' in candidate:
+                                blocks.append(candidate)
+                            i = j
+                            break
+        i += 1
+    return blocks
 
 def _get_tool_schemas():
-    global _tool_schemas
-    if _tool_schemas is None:
-        from src.tools.filesystem.read import ReadFileTool
-        from src.tools.filesystem.write import WriteFileTool
-        from src.tools.execution.bash import BashExecuteTool
-        _tool_schemas = [
-            ReadFileTool().get_schema(),
-            WriteFileTool().get_schema(),
-            BashExecuteTool().get_schema(),
-        ]
-    return _tool_schemas
+    return get_all_tool_schemas()
 
 
 async def _load_session_llm_config(db: AsyncSession, session_id: str) -> Dict[str, Any]:
@@ -147,8 +218,11 @@ class BrainWorker:
 
         # --- BYOK: Load dynamic LLM config from session ---
         llm_config = await _load_session_llm_config(db, session_id)
+        
+        from src.infrastructure.security.crypto import decrypt_string
+        raw_key = decrypt_string(llm_config.get("api_key", ""))
 
-        if not llm_config.get("api_key"):
+        if not raw_key:
             # Graceful error — send to terminal and chat instead of crashing
             error_msg = (
                 "\x1b[38;5;196m[CONFIG ERROR]\x1b[0m No API key configured.\r\n"
@@ -174,7 +248,7 @@ class BrainWorker:
             "tools": tools,
             "temperature": 0.0,
             "stream": True,
-            "api_key": llm_config["api_key"],
+            "api_key": raw_key,
         }
         if llm_config.get("base_url"):
             completion_kwargs["api_base"] = llm_config["base_url"]
@@ -222,11 +296,14 @@ class BrainWorker:
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in tool_calls_dict:
-                        tool_calls_dict[idx] = {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name or "", "arguments": ""}}
-                    if tc.function.name:
-                        tool_calls_dict[idx]["function"]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+                        # Initialize cleanly. Do NOT pull tc.function.name here to avoid duplicating it below
+                        tool_calls_dict[idx] = {"id": tc.id, "type": tc.type, "function": {"name": "", "arguments": ""}}
+                    
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_dict[idx]["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
 
         full_content = "".join(collected_content)
         
@@ -234,13 +311,23 @@ class BrainWorker:
             await broker.publish(f"task_log:{task_id}", b"\r\n")
 
         # --- Tool calls → emit to execution_queue ---
-        if tool_calls_dict:
+        
+        # 1. Check NemoClaw heuristic extraction first if native was empty
+        heuristic_calls = []
+        if not tool_calls_dict and full_content:
+            heuristic_calls = _extract_heuristic_tool_calls(full_content)
+
+        if tool_calls_dict or heuristic_calls:
             await persist_message(
                 db, session_id, "assistant",
                 full_content,
                 task_id=task_id,
             )
-            for tc in tool_calls_dict.values():
+            
+            # Combine calls
+            combined_calls = list(tool_calls_dict.values()) + heuristic_calls
+            
+            for tc in combined_calls:
                 await broker.publish(f"task_log:{task_id}", f"\x1b[38;5;220m\r\n[Executing Tool: {tc['function']['name']}]\x1b[0m\r\n".encode("utf-8"))
                 await broker.publish("execution_queue", {
                     "event_type": "EXECUTE_TOOL",

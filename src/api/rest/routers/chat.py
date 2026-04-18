@@ -7,10 +7,12 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException
 
-from src.api.rest.dependencies import get_db, get_broker_dep
+from src.api.rest.dependencies import get_db, get_broker_dep, get_current_user
 from src.infrastructure.db.models.task_model import TaskModel
 from src.infrastructure.db.models.message_model import MessageModel
+from src.infrastructure.db.models.session_model import SessionModel
 from src.domain.entities.task import TaskStatus
 
 router = APIRouter(prefix="/api/v1/chat", tags=["Chat"])
@@ -26,11 +28,20 @@ async def send_chat_message(
     req: ChatRequest,
     db: AsyncSession = Depends(get_db),
     broker=Depends(get_broker_dep),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Accepts a user message, creates a task, and dispatches
-    it to the brain worker via the event queue.
+    it to the brain worker via the event queue. Ensure session belongs to user.
     """
+    auth_check = await db.execute(
+        select(SessionModel.id).where(
+            SessionModel.id == req.session_id,
+            SessionModel.user_id == current_user
+        )
+    )
+    if not auth_check.scalar_one_or_none():
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized or session not found")
     # Create a task representing this chat interaction
     task = TaskModel(
         session_id=req.session_id,
@@ -61,8 +72,18 @@ async def get_chat_history(
     session_id: str,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Returns the persisted conversation history for a session."""
+    auth_check = await db.execute(
+        select(SessionModel.id).where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == current_user
+        )
+    )
+    if not auth_check.scalar_one_or_none():
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized or session not found")
+
     result = await db.execute(
         select(MessageModel)
         .where(MessageModel.session_id == session_id)

@@ -14,13 +14,39 @@ from src.infrastructure.db.models.message_model import MessageModel
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = (
-    "You are Antigravity Agent, an autonomous software engineer. "
-    "You have access to tools for reading files, writing files, "
-    "and executing shell commands inside a secure sandbox. "
-    "Think step-by-step. Use tools to gather information before acting. "
-    "When a task is complete, respond with a clear summary."
-)
+import os
+import platform
+import datetime
+
+def get_dynamic_system_prompt() -> str:
+    """Generates a highly-contextualized SWE-Agent persona prompt with exact tool names."""
+    os_name = platform.system()
+    cwd = os.getcwd()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Dynamically pull exact tool names from registry
+    from src.tools.registry import get_tool_names
+    available_tools = get_tool_names()
+    tool_list = ", ".join(f'`{t}`' for t in available_tools) if available_tools else "`bash_execute`, `read_file`, `write_file`"
+    
+    return f"""You are Antigravity Agent, an autonomous, senior software engineer.
+
+[ENVIRONMENT]
+- OS: {os_name}
+- Working Directory: {cwd}
+- Current Time: {now}
+
+[AVAILABLE TOOLS]
+You have EXACTLY these tools and NO others: {tool_list}
+DO NOT invent, guess, or create tool names that are not in this list.
+
+[RULES OF ENGAGEMENT]
+1. THINK step-by-step before acting.
+2. Use ONLY the tools listed above. If a tool name is not in the list, DO NOT call it.
+3. Chain tool calls: issue a tool call, observe results, then issue the next call until the task is done.
+4. On {os_name}, use appropriate shell commands (e.g., `dir` instead of `ls` on Windows).
+5. Be concise in final summaries.
+"""
 
 
 async def build_llm_context(
@@ -49,7 +75,7 @@ async def build_llm_context(
     rows = result.scalars().all()
 
     messages: List[Dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": get_dynamic_system_prompt()}
     ]
 
     import os

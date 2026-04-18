@@ -19,22 +19,8 @@ from src.services.tool_execution.router import ToolExecutionRouter
 
 logger = logging.getLogger(__name__)
 
-# Tool class registry — maps LLM function names to tool instances
-_tool_registry = None
-
-
-def _get_tool_registry():
-    global _tool_registry
-    if _tool_registry is None:
-        from src.tools.filesystem.read import ReadFileTool
-        from src.tools.filesystem.write import WriteFileTool
-        from src.tools.execution.bash import BashExecuteTool
-        _tool_registry = {
-            "read_file": ReadFileTool(),
-            "write_file": WriteFileTool(),
-            "bash_execute": BashExecuteTool(),
-        }
-    return _tool_registry
+# Tool class registry is now centralized dynamically
+from src.tools.registry import get_tool_instance
 
 
 class ToolWorker:
@@ -77,8 +63,7 @@ class ToolWorker:
             return
 
         # 2. Execute through the sandboxed router
-        registry = _get_tool_registry()
-        tool_instance = registry.get(tool_name)
+        tool_instance = get_tool_instance(tool_name)
 
         if not tool_instance:
             output = f"Unknown tool: {tool_name}"
