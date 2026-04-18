@@ -1,0 +1,81 @@
+version: "3.8"
+
+services:
+  # ── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: ag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: antigravity
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-ag_local_dev}
+      POSTGRES_DB: kernel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - ag-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antigravity"]
+      interval: 5s
+      retries: 5
+
+  # ── Redis ──
+  redis:
+    image: redis:7-alpine
+    container_name: ag-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - ag-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── API Gateway ──
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ag-api
+    restart: unless-stopped
+    ports:
+      - "8089:8089"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://antigravity:${PG_PASSWORD:-ag_local_dev}@postgres:5432/kernel
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ag-net
+
+  # ── Sandbox Container ──
+  sandbox:
+    image: python:3.11-slim
+    container_name: ag-sandbox
+    restart: unless-stopped
+    working_dir: /workspace
+    volumes:
+      - ${WORKSPACE_ROOT:-./workspace}:/workspace
+    networks:
+      - ag-net
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+
+volumes:
+  pg_data:
+
+networks:
+  ag-net:
+    driver: bridge
