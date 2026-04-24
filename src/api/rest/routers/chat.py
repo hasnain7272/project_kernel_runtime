@@ -1,14 +1,24 @@
 """
-Chat Router — Bridges user messages to the BrainWorker via the broker.
+Chat Router — Multi-tenant messaging to BrainWorker.
+
+- Tenant-scoped sessions
+- Per-tenant rate limiting
+- Tenant context in all DB queries
 """
 from typing import Dict, Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db, get_broker_dep, get_current_user, check_rate_limit
+from src.api.rest.dependencies import (
+    get_db,
+    get_broker_dep,
+    get_current_user_dep,
+    check_rate_limit,
+)
+from src.infrastructure.auth.jwt_auth import TokenPayload
 from src.infrastructure.db.models.task_model import TaskModel
 from src.infrastructure.db.models.message_model import MessageModel
 from src.infrastructure.db.models.session_model import SessionModel
@@ -20,6 +30,7 @@ router = APIRouter(prefix="/api/v1/chat", tags=["Chat"])
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    shadow_mode: bool = False
 
 
 @router.post("/", status_code=status.HTTP_202_ACCEPTED)
@@ -27,24 +38,34 @@ async def send_chat_message(
     req: ChatRequest,
     db: AsyncSession = Depends(get_db),
     broker=Depends(get_broker_dep),
-    current_user: str = Depends(get_current_user)
+    user: TokenPayload = Depends(get_current_user_dep),
 ) -> Dict[str, Any]:
     """
     Accepts a user message, creates a task, and dispatches
-    it to the brain worker via the event queue. Ensure session belongs to user.
+    to the brain worker via the event queue.
     """
-    await check_rate_limit(current_user)
+    await check_rate_limit(user)
     
+    # Verify session belongs to tenant
     auth_check = await db.execute(
-        select(SessionModel.id).where(
+        select(SessionModel).where(
             SessionModel.id == req.session_id,
-            SessionModel.user_id == current_user
+            SessionModel.tenant_id == user.tenant_id,
         )
     )
-    if not auth_check.scalar_one_or_none():
+    session = auth_check.scalar_one_or_none()
+    if not session:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized or session not found")
-    # Create a task representing this chat interaction
+        
+    # Update shadow mode in session context
+    context = dict(session.context) if session.context else {}
+    context["shadow_mode"] = req.shadow_mode
+    session.context = context
+    db.add(session)
+    
+    # Create task with tenant_id
     task = TaskModel(
+        tenant_id=user.tenant_id,
         session_id=req.session_id,
         description=req.message,
         status=TaskStatus.PENDING.value,
@@ -53,13 +74,17 @@ async def send_chat_message(
     await db.commit()
     await db.refresh(task)
 
-    # Dispatch to the brain via broker
-    await broker.publish("task_queue", {
-        "event_type": "AGENT_THINK",
-        "task_id": task.id,
-        "session_id": req.session_id,
-        "description": req.message,
-    })
+    # Dispatch with tenant context
+    await broker.publish(
+        "task_queue",
+        {
+            "event_type": "AGENT_THINK",
+            "task_id": task.id,
+            "session_id": req.session_id,
+            "description": req.message,
+        },
+        tenant_id=user.tenant_id,
+    )
 
     return {
         "status": "accepted",
@@ -73,13 +98,13 @@ async def get_chat_history(
     session_id: str,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
-    current_user: str = Depends(get_current_user)
+    user: TokenPayload = Depends(get_current_user_dep),
 ) -> Dict[str, Any]:
-    """Returns the persisted conversation history for a session."""
+    """Returns conversation history for session (tenant-scoped)."""
     auth_check = await db.execute(
         select(SessionModel.id).where(
             SessionModel.id == session_id,
-            SessionModel.user_id == current_user
+            SessionModel.tenant_id == user.tenant_id,
         )
     )
     if not auth_check.scalar_one_or_none():
@@ -87,7 +112,10 @@ async def get_chat_history(
 
     result = await db.execute(
         select(MessageModel)
-        .where(MessageModel.session_id == session_id)
+        .where(
+            MessageModel.session_id == session_id,
+            MessageModel.tenant_id == user.tenant_id,
+        )
         .order_by(MessageModel.sequence.asc())
         .limit(limit)
     )

@@ -1,37 +1,39 @@
 import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { DashboardLayout } from '@/layouts/DashboardLayout';
 import { CommandPalette } from '@/features/commander/CommandPalette';
 import { ToastContainer } from '@/components/Toast';
 import { useSessionStore } from '@/store/sessionStore';
+import { Login } from '@/features/auth/Login';
+import GitHubCallbackPage from '@/pages/GitHubCallback';
 
-export default function App() {
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const token = localStorage.getItem('auth_token');
+  const location = useLocation();
+
+  if (!token) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  return <>{children}</>;
+}
+
+function MainApp() {
   const ensureSession = useSessionStore((s) => s.ensureSession);
   const status = useSessionStore((s) => s.status);
+  const token = localStorage.getItem('auth_token');
 
   useEffect(() => {
-    ensureSession();
-  }, [ensureSession]);
+    if (token && window.location.pathname !== '/login') {
+      ensureSession();
+    }
+  }, [ensureSession, token]);
 
-  if (status === 'connecting') {
+  if (token && status === 'connecting') {
     return (
       <div className="flex h-screen items-center justify-center bg-slate-950 text-slate-500 text-sm">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-500/30 border-t-cyan-500" />
-          <span>Initializing session...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (status === 'error') {
-    return (
-      <div className="flex h-screen items-center justify-center bg-slate-950">
-        <div className="flex flex-col items-center gap-3 text-center">
-          <div className="rounded-2xl bg-red-900/20 p-4 ring-1 ring-red-500/30">
-            <span className="text-2xl">⚠️</span>
-          </div>
-          <p className="text-sm text-red-400">Failed to connect to backend.</p>
-          <p className="text-xs text-slate-500">Is the server running on :8089?</p>
+          <span>Syncing isolated workspace...</span>
         </div>
       </div>
     );
@@ -43,5 +45,24 @@ export default function App() {
       <CommandPalette />
       <ToastContainer />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/github/callback" element={<GitHubCallbackPage />} />
+        <Route 
+          path="/*" 
+          element={
+            <ProtectedRoute>
+              <MainApp />
+            </ProtectedRoute>
+          } 
+        />
+      </Routes>
+    </BrowserRouter>
   );
 }

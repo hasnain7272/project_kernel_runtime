@@ -1,103 +1,96 @@
+"""Docker Compose for Project Kernel Runtime - Local Development.
+
+Usage:
+  docker-compose up -d          # Start all services
+  docker-compose up -d --build  # Rebuild and start
+  docker-compose logs -f app    # View logs
+  docker-compose down           # Stop all services
+"""
 version: "3.8"
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: ag-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: antigravity
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-ag_local_dev}
-      POSTGRES_DB: kernel
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    networks:
-      - ag-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U antigravity"]
-      interval: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: ag-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    networks:
-      - ag-net
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      retries: 5
-
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: ag-api
-    restart: unless-stopped
+  # Main Application
+  app:
+    build: .
+    container_name: kernel-runtime
     ports:
       - "8089:8089"
     environment:
-      DATABASE_URL: postgresql+asyncpg://antigravity:${PG_PASSWORD:-ag_local_dev}@postgres:5432/kernel
-      REDIS_URL: redis://redis:6379/0
-      WORKSPACE_ROOT: /workspace
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      - ENVIRONMENT=development
+      - APP_SECRET_KEY=${APP_SECRET_KEY:-change-me-in-production}
+      - DATABASE_URL=sqlite:///data/kernel.db
+      - REDIS_URL=redis://redis:6379/0
+      - HYBRID_MODE=true
+      - ALLOW_ANON_LOCAL=true
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key-change-me}
+    volumes:
+      - ./data:/app/data
+      - ./workspace:/workspace
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - redis
     networks:
-      - ag-net
-    volumes:
-      - ${WORKSPACE_ROOT:-./workspace}:/workspace
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: ag-worker
+      - kernel-network
     restart: unless-stopped
-    command: ["python", "-m", "src.services.agent_loop.worker_main"]
-    environment:
-      DATABASE_URL: postgresql+asyncpg://antigravity:${PG_PASSWORD:-ag_local_dev}@postgres:5432/kernel
-      REDIS_URL: redis://redis:6379/0
-      WORKSPACE_ROOT: /workspace
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - ag-net
-    volumes:
-      - ${WORKSPACE_ROOT:-./workspace}:/workspace
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8089/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  sandbox:
-    image: python:3.11-slim
-    container_name: ag-sandbox
-    restart: unless-stopped
-    working_dir: /workspace
+  # Redis for message queue and caching
+  redis:
+    image: redis:7-alpine
+    container_name: kernel-redis
+    ports:
+      - "6379:6379"
     volumes:
-      - ${WORKSPACE_ROOT:-./workspace}:/workspace
+      - redis-data:/data
     networks:
-      - ag-net
-    cap_drop:
-      - ALL
-    read_only: true
-    tmpfs:
-      - /tmp:size=100M
+      - kernel-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # Optional: PostgreSQL for production-like setup
+  # Uncomment to use PostgreSQL instead of SQLite
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: kernel-postgres
+  #   environment:
+  #     - POSTGRES_USER=kernel
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-kernel-pass}
+  #     - POSTGRES_DB=kernel
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - kernel-network
+  #   restart: unless-stopped
+
+  # Optional: Caddy reverse proxy with HTTPS
+  # Uncomment for production-like HTTPS setup
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: kernel-caddy
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   networks:
+  #     - kernel-network
+  #   restart: unless-stopped
 
 volumes:
-  pg_data:
+  redis-data:
+  # postgres-data:
+  # caddy-data:
+  # caddy-config:
 
 networks:
-  ag-net:
+  kernel-network:
     driver: bridge

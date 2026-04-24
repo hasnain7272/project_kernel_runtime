@@ -19,14 +19,14 @@ def _default_workspace_root() -> Path:
     return workspace_dir.resolve() if workspace_dir.exists() else cwd.resolve()
 
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "4.0.0-PROD"
 WORKSPACE_ROOT = _default_workspace_root()
 
-# Security: Disable anon local by default for production
-ALLOW_ANON_LOCAL = _flag("ALLOW_ANON_LOCAL", False)
+# Security: Strictly disable local execution for SaaS isolation.
+ALLOW_ANON_LOCAL = False
 
-# Sandbox: Require sandbox by default (security)
-SANDBOX_MODE = os.environ.get("SANDBOX_MODE", "docker").strip().lower()
+# Sandbox: Enforce Docker microVMs for zero leakage.
+SANDBOX_MODE = "docker"
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "python:3.11-slim")
 
 # Kubernetes disabled by default (opt-in)

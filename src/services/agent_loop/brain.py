@@ -15,7 +15,7 @@ import os
 import re
 from typing import Dict, Any, List
 
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.llm.litellm_client import LLMClient
@@ -28,6 +28,7 @@ from src.services.memory.context_builder import (
     build_llm_context,
     persist_message,
 )
+from src.services.billing.usage_tracker import usage_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -41,102 +42,22 @@ async def _get_broker():
         _broker = await get_streams_broker()
     return _broker
 
-def _extract_heuristic_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """
-    NemoClaw Hybrid Parser:
-    Extracts embedded JSON action payloads when the LLM outputs tool calls as plaintext.
-    Uses balanced-brace matching instead of greedy regex for reliability.
-    Validates extracted tool names against the actual registry.
-    """
-    calls = []
-    
-    # Get valid tool names from registry to validate against
-    from src.tools.registry import get_tool_names
-    valid_names = set(get_tool_names())
-    
-    # Find all top-level JSON objects using balanced brace matching
-    json_blocks = _find_json_blocks(text)
-    
-    for block in json_blocks:
-        try:
-            parsed = json.loads(block)
-            if not isinstance(parsed, dict):
-                continue
-            actions = parsed.get("actions")
-            if not isinstance(actions, list):
-                continue
-            for act in actions:
-                if not isinstance(act, dict):
-                    continue
-                action_name = act.get("action") or act.get("tool") or act.get("name")
-                if action_name and action_name in valid_names:
-                    args = {k: v for k, v in act.items() if k not in ["action", "tool", "name"]}
-                    calls.append({
-                        "type": "function",
-                        "function": {
-                            "name": action_name,
-                            "arguments": json.dumps(args),
-                        }
-                    })
-                elif action_name:
-                    logger.warning(f"[HeuristicParser] Ignoring unknown tool '{action_name}' from text extraction")
-        except (json.JSONDecodeError, ValueError):
-            continue
-    
-    if calls:
-        logger.info(f"[HeuristicParser] Extracted {len(calls)} tool calls from plaintext")
-    return calls
-
-
-def _find_json_blocks(text: str) -> List[str]:
-    """Extract top-level JSON object strings using balanced brace matching."""
-    blocks = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            start = i
-            in_string = False
-            escape = False
-            for j in range(i, len(text)):
-                ch = text[j]
-                if escape:
-                    escape = False
-                    continue
-                if ch == '\\':
-                    escape = True
-                    continue
-                if ch == '"' and not escape:
-                    in_string = not in_string
-                if not in_string:
-                    if ch == '{':
-                        depth += 1
-                    elif ch == '}':
-                        depth -= 1
-                        if depth == 0:
-                            candidate = text[start:j+1]
-                            if '"actions"' in candidate:
-                                blocks.append(candidate)
-                            i = j
-                            break
-        i += 1
-    return blocks
-
 def _get_tool_schemas():
     return get_all_tool_schemas()
 
 
-async def _load_session_llm_config(db: AsyncSession, session_id: str) -> Dict[str, Any]:
+async def _load_session_llm_config(db: AsyncSession, session_id: str, session: Any = None) -> Dict[str, Any]:
     """
     BYOK Resolution Order:
     1. SessionModel.context (user-configured via Settings UI)
     2. Environment variables (host-level fallback)
     3. Empty — will trigger a user-friendly error
     """
-    result = await db.execute(
-        select(SessionModel).where(SessionModel.id == session_id)
-    )
-    session = result.scalar_one_or_none()
+    if session is None:
+        result = await db.execute(
+            select(SessionModel).where(SessionModel.id == session_id)
+        )
+        session = result.scalar_one_or_none()
     ctx = (session.context if session else None) or {}
 
     config: Dict[str, Any] = {}
@@ -162,19 +83,14 @@ async def _load_session_llm_config(db: AsyncSession, session_id: str) -> Dict[st
     if base_url:
         config["base_url"] = base_url
 
-        # LiteLLM provider routing: when using a custom base_url (NVIDIA NIM,
-        # Together, Groq, vLLM, etc.), litellm requires the model name to carry
-        # a provider prefix so it knows which client protocol to use.
-        # If the model doesn't already have a recognized litellm prefix,
-        # prepend "openai/" since all these endpoints are OpenAI-compatible.
-        KNOWN_PREFIXES = (
-            "openai/", "anthropic/", "ollama/", "huggingface/",
-            "together_ai/", "groq/", "bedrock/", "vertex_ai/",
-            "azure/", "deepseek/", "mistral/",
-        )
-        model = config["model"]
-        if not any(model.startswith(p) for p in KNOWN_PREFIXES):
-            config["model"] = f"openai/{model}"
+        # LiteLLM provider routing: when using a custom base_url, litellm
+        # just forwards requests to that URL using OpenAI-compatible protocol.
+        # The model name should be sent as-is (the API knows its own model IDs).
+        # We only add a litellm prefix when there's NO base_url, so litellm
+        # can auto-route to the correct provider.
+        #
+        # With base_url: model stays as-is (e.g. 'nvidia/nemotron-3-super-120b-a12b')
+        # Without base_url: add prefix for litellm routing (e.g. 'nvidia_nim/model')
 
     # Extra body (for NVIDIA Nemotron reasoning, etc.)
     extra_body = ctx.get("extra_body")
@@ -211,8 +127,37 @@ class BrainWorker:
 
         logger.info(f"[Brain] {task_id} — Reasoning step initiated in project_kernel_runtime")
 
+        # --- Load session with tenant isolation ---
+        tenant_id = event.get("tenant_id")
+        if tenant_id:
+            session_result = await db.execute(
+                select(SessionModel).where(
+                    and_(
+                        SessionModel.id == session_id,
+                        SessionModel.tenant_id == tenant_id,
+                    )
+                )
+            )
+        else:
+            session_result = await db.execute(
+                select(SessionModel).where(SessionModel.id == session_id)
+            )
+        session = session_result.scalar_one_or_none()
+        if not session:
+            logger.error(f"[Brain] Session {session_id} not found or unauthorized (tenant={tenant_id})")
+            error_msg = "⚠️ Session not found or unauthorized."
+            await persist_message(db, session_id, "system", error_msg, task_id=task_id)
+            await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
+            await db.commit()
+            return
+        # Use tenant_id from the loaded session to ensure correctness
+        tenant_id = session.tenant_id
+
         # --- Circuit Breaker (prevents infinite ReAct loops) ---
-        task_result = await db.execute(select(TaskModel).where(TaskModel.id == task_id))
+        task_conditions = [TaskModel.id == task_id, TaskModel.session_id == session_id]
+        if tenant_id:
+            task_conditions.append(TaskModel.tenant_id == tenant_id)
+        task_result = await db.execute(select(TaskModel).where(and_(*task_conditions)))
         task = task_result.scalar_one_or_none()
         
         MAX_ITERATIONS = 50   # Hard limit — enough for complex multi-file tasks
@@ -245,12 +190,18 @@ class BrainWorker:
                 db, session_id, "user", description, task_id=task_id
             )
 
+        # 2. Publish initial thinking log
+        await broker.publish(f"task_log:{task_id}", {
+            "status": "thinking",
+            "message": "Analyzing request..."
+        })
+
         # Build full context from DB (includes all prior tool results)
-        messages = await build_llm_context(db, session_id, task_id)
+        messages = await build_llm_context(db, session_id, task_id, session=session)
         tools = _get_tool_schemas()
 
         # --- BYOK: Load dynamic LLM config from session ---
-        llm_config = await _load_session_llm_config(db, session_id)
+        llm_config = await _load_session_llm_config(db, session_id, session=session)
         
         from src.infrastructure.security.crypto import decrypt_string
         raw_key = decrypt_string(llm_config.get("api_key", ""))
@@ -288,7 +239,33 @@ class BrainWorker:
         if llm_config.get("extra_body"):
             completion_kwargs["extra_body"] = llm_config["extra_body"]
 
-        logger.info(f"[Brain] LLM config → model={llm_config['model']}, base_url={llm_config.get('base_url', 'auto')}")
+        # Provider routing: LiteLLM needs custom_llm_provider to select protocol.
+        # When api_base is set → endpoint is OpenAI-compatible, use 'openai' provider
+        # and keep model name as-is (it's the API's model ID, not a litellm prefix).
+        # When api_base is NOT set → litellm auto-routes by model prefix.
+        model_name = llm_config["model"]
+        if completion_kwargs.get("api_base"):
+            # Custom endpoint — OpenAI-compatible, model name stays as-is
+            completion_kwargs["custom_llm_provider"] = "openai"
+        elif "/" in model_name:
+            # No custom base URL — let litellm route by prefix
+            completion_kwargs["custom_llm_provider"] = model_name.split("/")[0]
+        else:
+            completion_kwargs["custom_llm_provider"] = "openai"
+
+        logger.info(f"[Brain] LLM config → model={llm_config['model']}, base_url={llm_config.get('base_url', 'auto')}, provider={completion_kwargs.get('custom_llm_provider')}")
+        
+        # --- SaaS Billing: Quota Check ---
+        from src.services.billing.usage_tracker import usage_tracker, QuotaExceededError
+        try:
+            await usage_tracker.check_quota(db, tenant_id)
+        except QuotaExceededError as e:
+            error_msg = f"\x1b[38;5;196m[QUOTA EXCEEDED]\x1b[0m {str(e)}"
+            await broker.publish(f"task_log:{task_id}", error_msg.encode("utf-8"))
+            await persist_message(db, session_id, "system", error_msg, task_id=task_id)
+            await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
+            await db.commit()
+            return
 
         if not await self._circuit_breaker.can_execute():
             error_msg = "\x1b[38;5;196m[CIRCUIT BREAKER OPEN]\x1b[0m LLM service temporarily unavailable. Please try again later."
@@ -298,6 +275,11 @@ class BrainWorker:
             await db.commit()
             return
 
+        # 4. Completion call
+        await broker.publish(f"task_log:{task_id}", {
+            "status": "thinking",
+            "message": "Generating response..."
+        })
         try:
             response = await self._circuit_breaker.protected(acompletion)(**completion_kwargs)
         except CircuitBreakerOpenError:
@@ -333,18 +315,22 @@ class BrainWorker:
             # Handle reasoning_content (NVIDIA Nemotron / DeepSeek style)
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
-                await broker.publish(f"task_log:{task_id}", f"\x1b[38;5;244m{reasoning}\x1b[0m".encode("utf-8"))
+                await broker.publish(f"task_log:{task_id}", {
+                    "event": "reasoning",
+                    "text": reasoning
+                })
 
             if delta.content:
                 collected_content.append(delta.content)
-                # Stream the content token to the websocket terminal
-                await broker.publish(f"task_log:{task_id}", delta.content.encode("utf-8"))
+                await broker.publish(f"task_log:{task_id}", {
+                    "event": "token",
+                    "text": delta.content
+                })
             
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in tool_calls_dict:
-                        # Initialize cleanly. Do NOT pull tc.function.name here to avoid duplicating it below
                         tool_calls_dict[idx] = {"id": tc.id, "type": tc.type, "function": {"name": "", "arguments": ""}}
                     
                     if tc.function:
@@ -353,30 +339,52 @@ class BrainWorker:
                         if tc.function.arguments:
                             tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
 
+        # SaaS Billing: Track usage telemetry
+        final_usage = getattr(response, "usage", None)
+        if final_usage:
+            import asyncio
+            asyncio.create_task(usage_tracker.track_llm_usage(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                task_id=task_id,
+                model=llm_config["model"],
+                usage=final_usage
+            ))
+
         full_content = "".join(collected_content)
         
         if full_content:
             await broker.publish(f"task_log:{task_id}", b"\r\n")
+            
+            try:
+                from src.services.memory.semantic_memory import semantic_memory
+                await semantic_memory.index_event(
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    event_type="thought",
+                    content=full_content,
+                    task_id=task_id
+                )
+            except Exception as mem_err:
+                logger.error(f"[Brain] Failed to index thought: {mem_err}")
 
         # --- Tool calls → emit to execution_queue ---
-        
-        # 1. Check NemoClaw heuristic extraction first if native was empty
-        heuristic_calls = []
-        if not tool_calls_dict and full_content:
-            heuristic_calls = _extract_heuristic_tool_calls(full_content)
-
-        if tool_calls_dict or heuristic_calls:
+        if tool_calls_dict:
             await persist_message(
                 db, session_id, "assistant",
                 full_content,
                 task_id=task_id,
+                tool_calls=list(tool_calls_dict.values())
             )
             
-            # Combine calls
-            combined_calls = list(tool_calls_dict.values()) + heuristic_calls
+            combined_calls = list(tool_calls_dict.values())
             
             for tc in combined_calls:
-                await broker.publish(f"task_log:{task_id}", f"\x1b[38;5;220m\r\n[Executing Tool: {tc['function']['name']}]\x1b[0m\r\n".encode("utf-8"))
+                await broker.publish(f"task_log:{task_id}", {
+                    "event": "tool_start",
+                    "name": tc['function']['name'],
+                    "args": tc['function']['arguments']
+                })
                 from src.infrastructure.observability.tracing import milestones
                 milestones.milestone("Action Dispatched", {"tool": tc['function']['name']})
                 
@@ -385,9 +393,11 @@ class BrainWorker:
                     "task_id": task_id,
                     "session_id": session_id,
                     "tool": {
+                        "id": tc["id"],
                         "name": tc["function"]["name"],
                         "args": json.loads(tc["function"]["arguments"]),
                     },
+                    "tenant_id": tenant_id,
                 }, trace_id=trace_id)
                 logger.info(f"[Brain] → EXECUTE: {tc['function']['name']}")
         else:

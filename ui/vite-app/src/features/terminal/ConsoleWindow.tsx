@@ -2,13 +2,15 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { getTenantId } from '@/api/client';
+import { useSessionStore } from '@/store/sessionStore';
 import { useTaskStore } from '@/store/taskStore';
+import { getAuthToken } from '@/api/client';
 
 export function ConsoleWindow() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const activeTaskId = useTaskStore((s) => s.activeTaskId);
+  const tenantId = useSessionStore((s) => s.tenantId);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -44,9 +46,11 @@ export function ConsoleWindow() {
     const term = xtermRef.current;
     term.writeln(`\r\n\x1b[38;5;46m[SYSTEM] Establishing WebSocket for Task: ${activeTaskId}...\x1b[0m\r\n`);
     
-    // Connect relative to current window location protocol/host
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${protocol}://${window.location.host}/api/v1/tasks/${activeTaskId}/stream?tenant_id=${encodeURIComponent(getTenantId())}`;
+    const params = new URLSearchParams({ tenant_id: tenantId || 'local' });
+    const token = getAuthToken();
+    if (token) params.set('token', token);
+    const wsUrl = `${protocol}://${window.location.host}/api/v1/tasks/${activeTaskId}/stream?${params.toString()}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {

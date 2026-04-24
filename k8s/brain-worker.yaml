@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antigravity-brain-worker
+  namespace: antigravity
+  labels:
+    app: antigravity-brain-worker
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: antigravity-brain-worker
+  template:
+    metadata:
+      labels:
+        app: antigravity-brain-worker
+    spec:
+      serviceAccountName: antigravity-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: worker
+          image: antigravity/runtime:3.0.0
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.services.agent_loop.worker_main"]
+          envFrom:
+            - configMapRef:
+                name: antigravity-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: antigravity-secrets
+                  key: DB_PASSWORD
+            - name: WORKER_CONSUMER_GROUP
+              value: "brain-workers"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import sys; sys.exit(0)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: antigravity-brain-worker-hpa
+  namespace: antigravity
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: antigravity-brain-worker
+  minReplicas: 3
+  maxReplicas: 30
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: redis_stream_pending
+          selector:
+            matchLabels:
+              stream: task_queue
+        target:
+          type: AverageValue
+          averageValue: "100"

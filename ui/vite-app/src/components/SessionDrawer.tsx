@@ -110,14 +110,14 @@ export function SessionDrawer({ open, onClose, onOpenSettings }: SessionDrawerPr
   /* ── Create ────────────────────────────────────────────── */
   const handleCreate = async () => {
     setCreating(true);
-    const res = await apiClient.post<{ session_id: string }>('/sessions/', {
-      user_id: 'local', workspace_path: '.', mode: 'web', name: 'New Session',
+    const res = await apiClient.post<{ id: string }>('/sessions/', {
+      name: 'New Session', mode: 'web',
     });
-    if (res.data?.session_id) {
-      setSessionId(res.data.session_id);
+    if (res.data?.id) {
+      setSessionId(res.data.id);
       clearTasks();
       await loadSessions();
-      onOpenSettings(res.data.session_id);
+      onOpenSettings(res.data.id);
     }
     setCreating(false);
   };

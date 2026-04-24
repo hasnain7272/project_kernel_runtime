@@ -8,6 +8,7 @@ interface MessageBubbleProps {
   role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
   streaming?: boolean;
+  tool_calls?: any[];
 }
 
 const ROLE_CONFIG = {
@@ -81,7 +82,7 @@ function renderContent(content: string) {
   });
 }
 
-export function MessageBubble({ role, content, streaming }: MessageBubbleProps) {
+export function MessageBubble({ role, content, streaming, tool_calls }: MessageBubbleProps) {
   const config = ROLE_CONFIG[role] || ROLE_CONFIG.assistant;
   const Icon = config.icon;
 
@@ -112,6 +113,52 @@ export function MessageBubble({ role, content, streaming }: MessageBubbleProps) 
             </span>
           )}
         </div>
+
+        {/* Tool Calls Polish */}
+        {tool_calls && tool_calls.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {tool_calls.map((tc, i) => {
+              const tName = tc.function?.name || 'tool_execution';
+              const isSwarm = tName === 'delegate_task';
+              const isMemory = tName === 'search_past_decisions';
+              
+              let headerColor = "text-cyan-400";
+              let dotColor = "bg-cyan-400";
+              let label = "Execution";
+              let bgClass = "bg-slate-900/60 border-slate-700/50";
+              let headBg = "bg-slate-800/80";
+
+              if (isSwarm) {
+                headerColor = "text-violet-400";
+                dotColor = "bg-violet-400";
+                label = "Sub-Agent Spawned";
+                bgClass = "bg-violet-950/20 border-violet-800/30 ring-1 ring-violet-500/20 shadow-lg shadow-violet-900/10";
+                headBg = "bg-violet-900/20";
+              } else if (isMemory) {
+                headerColor = "text-amber-400";
+                dotColor = "bg-amber-400";
+                label = "Accessing Cortex Memory";
+                bgClass = "bg-amber-950/20 border-amber-800/30 ring-1 ring-amber-500/20 shadow-lg shadow-amber-900/10";
+                headBg = "bg-amber-900/20";
+              }
+
+              return (
+                <div key={i} className={`flex flex-col border rounded-lg overflow-hidden transition-all ${bgClass}`}>
+                  <div className={`flex items-center gap-2 px-3 py-2 border-b border-slate-700/50 ${headBg}`}>
+                    <div className={`w-2 h-2 rounded-full animate-pulse ${dotColor}`} />
+                    <span className={`text-xs font-semibold font-mono ${headerColor}`}>
+                      {tName}
+                    </span>
+                    <span className="text-[10px] text-slate-500 ml-auto uppercase tracking-wider">{label}</span>
+                  </div>
+                  <div className="px-3 py-2 text-xs text-slate-400 font-mono overflow-x-auto whitespace-pre-wrap">
+                    {tc.function?.arguments || '{}'}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* User avatar on right */}

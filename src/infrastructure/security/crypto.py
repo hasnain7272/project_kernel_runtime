@@ -7,6 +7,13 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+try:
+    import bcrypt
+    BCRYPT_AVAILABLE = True
+except ImportError:
+    BCRYPT_AVAILABLE = False
+    bcrypt = None
+
 logger = logging.getLogger(__name__)
 _KEY_FILE = Path.cwd() / ".runtime_secret.key"
 
@@ -39,3 +46,19 @@ def decrypt_string(encrypted_data: str) -> str:
     except Exception as exc:
         logger.error(f"Decryption failed: {exc}")
         return ""
+
+
+def hash_password(password: str) -> str:
+    """Hash password with bcrypt."""
+    if not BCRYPT_AVAILABLE:
+        raise RuntimeError("bcrypt not installed. Run: pip install bcrypt")
+    salt = bcrypt.gensalt(rounds=12)
+    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify password against hash."""
+    if not BCRYPT_AVAILABLE:
+        raise RuntimeError("bcrypt not installed. Run: pip install bcrypt")
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))

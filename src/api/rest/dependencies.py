@@ -1,26 +1,31 @@
 """
-FastAPI dependencies.
+FastAPI dependencies — Multi-tenant aware.
+
+- Tenant context from JWT
+- Per-tenant rate limiting
+- Tenant-scoped database queries
+
+Backward compatibility: Legacy functions for old router code.
 """
 import os
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.db.session import get_db_session
 from src.infrastructure.queue.redis_streams_broker import get_streams_broker
 from src.infrastructure.runtime.config import ALLOW_ANON_LOCAL
-from src.infrastructure.resilience.rate_limiter import RedisRateLimiter, RateLimitConfig, RateLimitStrategy
+from src.infrastructure.auth.jwt_auth import (
+    decode_token,
+    TokenPayload,
+    create_token_pair,
+)
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
 
-_rate_limiter = None
-
-async def get_rate_limiter():
-    global _rate_limiter
-    if _rate_limiter is None and REDIS_URL:
-        _rate_limiter = RedisRateLimiter(REDIS_URL)
-    return _rate_limiter
+_bearer = HTTPBearer(auto_error=False)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -32,7 +37,75 @@ async def get_broker_dep():
     return await get_streams_broker()
 
 
-def resolve_current_user(tenant_id: str | None) -> str:
+async def get_current_user_dep(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> TokenPayload:
+    """Get current user from JWT token."""
+    if not credentials:
+        if ALLOW_ANON_LOCAL:
+            return TokenPayload(
+                tenant_id="local",
+                user_id="local",
+                email="local@dev.local",
+                role="developer",
+                tier="pro",
+                limits={"rpm": 60, "rph": 500},
+                exp=0,
+                iat=0,
+                organization_id=None,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    
+    return decode_token(credentials.credentials)
+
+
+async def get_tenant_id(
+    user: TokenPayload = Depends(get_current_user_dep),
+) -> str:
+    """Get current tenant ID."""
+    return user.tenant_id
+
+
+async def check_rate_limit(user: TokenPayload = Depends(get_current_user_dep)):
+    """Rate limit check per tenant."""
+    if not REDIS_URL:
+        return
+    
+    from src.infrastructure.resilience.rate_limiter import RedisRateLimiter, RateLimitConfig, RateLimitStrategy
+    
+    limiter = RedisRateLimiter(REDIS_URL)
+    config = RateLimitConfig(
+        requests_per_minute=user.limits.get("rpm", 60),
+        requests_per_hour=user.limits.get("rph", 500),
+        strategy=RateLimitStrategy.SLIDING_WINDOW,
+    )
+    
+    limit_result = await limiter.check_rate_limit(f"ratelimit:{user.tenant_id}", config)
+    
+    if not limit_result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "Rate limit exceeded",
+                "retry_after": int(limit_result.retry_after or 60),
+                "limit": limit_result.limit,
+            }
+        )
+
+
+# Backward compatibility: Legacy functions for old routers
+async def get_current_user(
+    payload: TokenPayload = Depends(get_current_user_dep)
+) -> str:
+    """Legacy: Return user_id string (backward compat)."""
+    return payload.user_id
+
+
+async def resolve_current_user(tenant_id: str | None) -> str:
+    """Legacy: Resolve current user ID."""
     if tenant_id and tenant_id.strip():
         return tenant_id.strip()
     if ALLOW_ANON_LOCAL:
@@ -41,28 +114,3 @@ def resolve_current_user(tenant_id: str | None) -> str:
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Missing X-Tenant-Id header.",
     )
-
-
-async def get_current_user(x_tenant_id: str = Header(default=None)):
-    return resolve_current_user(x_tenant_id)
-
-
-async def check_rate_limit(user_id: str):
-    """Rate limit check - returns None if allowed, raises HTTPException if blocked."""
-    limiter = await get_rate_limiter()
-    if limiter is None:
-        return  # No Redis = no rate limiting
-    
-    config = RateLimitConfig(
-        requests_per_minute=60,
-        requests_per_hour=500,
-        strategy=RateLimitStrategy.SLIDING_WINDOW,
-    )
-    
-    status = await limiter.check_rate_limit(f"ratelimit:{user_id}", config)
-    
-    if not status.allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {int(status.retry_after or 60)} seconds."
-        )

@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: antigravity-config
+  namespace: antigravity
+data:
+  APP_ENV: "production"
+  APP_VERSION: "3.0.0"
+  HYBRID_MODE: "false"
+  SANDBOX_MODE: "kubernetes"
+  KUBERNETES_MODE: "true"
+  K8S_NAMESPACE: "antigravity-sandbox"
+  DATABASE_URL: "postgresql+asyncpg://antigravity:${DB_PASSWORD}@postgres:5432/kernel"
+  REDIS_URL: "redis://redis:6379/0"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  OTEL_SERVICE_NAME: "antigravity-api"
+  OTEL_SERVICE_VERSION: "3.0.0"
+  OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
+  OTEL_TRACES_SAMPLER_ARG: "1.0"
+  LOG_LEVEL: "INFO"
+  MAX_PARALLEL_TOOLS: "5"
+  TOOL_EXECUTION_TIMEOUT: "60"
+  BRAIN_WORKER_REPLICAS: "3"
+  TOOL_WORKER_REPLICAS: "5"

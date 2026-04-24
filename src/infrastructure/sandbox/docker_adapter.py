@@ -1,115 +1,190 @@
 """
-Docker sandbox adapter.
+Sandbox Adapter — Fail-Closed Execution Isolation
+
+Production: Runs commands in Docker containers with resource limits.
+Development: Runs commands locally but ONLY when ALLOW_ANON_LOCAL=true.
+SaaS Production: Refuses execution entirely if Docker is unavailable.
+
+The adapter NEVER silently falls back to host execution in production.
 """
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict
 
 from src.domain.exceptions import SandboxExecutionError
-from src.infrastructure.runtime.config import SANDBOX_IMAGE
-from src.infrastructure.runtime.paths import resolve_workspace_path
+from src.infrastructure.runtime.config import SANDBOX_IMAGE, ALLOW_ANON_LOCAL
+from src.infrastructure.runtime.paths import get_session_root, resolve_workspace_path
 
 logger = logging.getLogger(__name__)
 
 
-class DockerAdapter:
+class SandboxAdapter:
+    """Unified sandbox for command execution with fail-closed security."""
+
     def __init__(self, image: str = SANDBOX_IMAGE):
         self.image = image
-        self._docker_available = None
+        self._docker_available: bool | None = None
 
     async def _check_docker(self) -> bool:
-        """Proactively probe for Docker availability."""
+        """Probe Docker daemon availability (cached after first check)."""
         if self._docker_available is not None:
             return self._docker_available
-        
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "info",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(proc.wait(), timeout=2)
-            self._docker_available = (proc.returncode == 0)
+            await asyncio.wait_for(proc.wait(), timeout=3)
+            self._docker_available = proc.returncode == 0
         except Exception:
             self._docker_available = False
-        
+
         if not self._docker_available:
-            from src.infrastructure.observability.tracing import milestones
-            milestones.milestone("Sandbox Isolation Degraded", {"reason": "Docker daemon unreachable", "mode": "local_restricted"})
-        
+            logger.warning("[Sandbox] Docker daemon not reachable")
+
         return self._docker_available
 
     async def execute(
         self,
         command: str,
         session_id: str,
+        tenant_id: str,
         working_dir: str = ".",
         timeout: int = 30,
         memory_limit_mb: int = 512,
         network_mode: str = "none",
     ) -> Dict[str, Any]:
-        import os
-        import subprocess
         start_time = time.time()
-        
-        # 1. Use main workspace for file persistence
-        base_workspace = str(resolve_workspace_path("."))
-        
-        # 2. Adaptive Strategy: Docker vs. Local Restricted
-        use_docker = await self._check_docker()
-        
-        if use_docker:
-            docker_args = [
-                "docker", "run", "--rm",
-                f"--memory={memory_limit_mb}m",
-                f"--network={network_mode}",
-                "-v", f"{os.path.abspath(base_workspace)}:/workspace:rw",
-                "-w", "/workspace",
-                self.image, "/bin/sh", "-c", command,
-            ]
-            
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *docker_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                return {
-                    "exit_code": proc.returncode,
-                    "stdout": stdout.decode("utf-8", errors="replace"),
-                    "stderr": stderr.decode("utf-8", errors="replace"),
-                    "duration_ms": round((time.time() - start_time) * 1000),
-                    "sandbox": "docker"
-                }
-            except Exception as e:
-                # If docker specifically fails during execution, we catch and report
-                logger.warning(f"Docker execution failed, but daemon was up: {e}")
-        
-        # 3. Fallback: Local Restricted Sandbox (project_kernel_runtime)
-        # This is for dev environments or where Docker is blocked.
-        # We run the command in the tenant-specific subdirectory.
+        session_root = get_session_root(tenant_id, session_id)
+        session_root.mkdir(parents=True, exist_ok=True)
+        working_path = resolve_workspace_path(
+            working_dir,
+            session_id=session_id,
+            tenant_id=tenant_id,
+        )
         try:
-            # Simple local subproc execution restricted to the tenant folder
-            shell_cmd = ["cmd", "/c", command] if os.name == "nt" else ["/bin/sh", "-c", command]
-            
+            relative_workdir = working_path.relative_to(session_root)
+            container_workdir = "/workspace"
+            if str(relative_workdir) not in {"", "."}:
+                container_workdir = f"/workspace/{relative_workdir.as_posix()}"
+        except ValueError:
+            raise SandboxExecutionError(f"Working directory escapes session root: {working_path}")
+        
+        if await self._check_docker():
+            return await self._run_in_docker(
+                command,
+                str(session_root),
+                container_workdir,
+                memory_limit_mb,
+                network_mode,
+                timeout,
+                start_time,
+            )
+
+        if ALLOW_ANON_LOCAL:
+            logger.warning("[Sandbox] DEV MODE: Running locally (no Docker)")
+            return await self._run_local_dev(
+                command,
+                str(working_path),
+                timeout,
+                start_time,
+            )
+
+        raise SandboxExecutionError(
+            "Docker is required for command execution in production. "
+            "Set ALLOW_ANON_LOCAL=true for local development only."
+        )
+
+    async def _run_in_docker(
+        self,
+        command: str,
+        workspace: str,
+        container_workdir: str,
+        memory_mb: int,
+        network: str,
+        timeout: int,
+        t0: float,
+    ) -> Dict[str, Any]:
+        """Execute in an isolated Docker container."""
+        docker_args = [
+            "docker", "run", "--rm",
+            f"--memory={memory_mb}m",
+            f"--network={network}",
+            "--pids-limit", "256",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "-v", f"{os.path.abspath(workspace)}:/workspace:rw",
+            "-w", container_workdir,
+            self.image, "/bin/sh", "-c", command,
+        ]
+
+        try:
             proc = await asyncio.create_subprocess_exec(
-                *shell_cmd,
-                cwd=tenant_workspace,
+                *docker_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "SANDBOX_MODE": "local", "TENANT_ID": session_id}
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
             return {
+                "success": proc.returncode == 0,
                 "exit_code": proc.returncode,
-                "stdout": stdout.decode("utf-8", errors="replace"),
-                "stderr": stderr.decode("utf-8", errors="replace"),
-                "duration_ms": round((time.time() - start_time) * 1000),
-                "sandbox": "local_restricted",
-                "warning": "Docker missing. Running in restricted local mode."
+                "stdout": stdout.decode("utf-8", errors="replace")[:50000],
+                "stderr": stderr.decode("utf-8", errors="replace")[:10000],
+                "duration_ms": round((time.time() - t0) * 1000),
+                "sandbox": "docker",
             }
-        except Exception as local_err:
-            raise SandboxExecutionError(f"Complete sandbox failure: {local_err}")
+        except asyncio.TimeoutError:
+            return {"success": False, "error": f"Docker timeout after {timeout}s", "sandbox": "docker"}
+        except Exception as e:
+            raise SandboxExecutionError(f"Docker execution failed: {e}")
+
+    async def _run_local_dev(
+        self, command: str, cwd: str, timeout: int, t0: float
+    ) -> Dict[str, Any]:
+        """Execute locally — ONLY for development with ALLOW_ANON_LOCAL=true."""
+        shell_cmd = (
+            ["cmd", "/c", command] if os.name == "nt"
+            else ["/bin/sh", "-c", command]
+        )
+
+        # Sanitized environment — strip sensitive vars
+        safe_env = {
+            k: v for k, v in os.environ.items()
+            if k not in {"AWS_SECRET_ACCESS_KEY", "DATABASE_URL", "JWT_SECRET", "APP_SECRET_KEY"}
+        }
+        safe_env["SANDBOX_MODE"] = "local_dev"
+        
+        # Ensure cwd exists, fallback to current directory to prevent WinError 267
+        if not os.path.exists(cwd):
+            logger.warning(f"[Sandbox] cwd {cwd} does not exist, falling back to current directory")
+            cwd = os.getcwd()
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *shell_cmd,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=safe_env,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+            return {
+                "success": proc.returncode == 0,
+                "exit_code": proc.returncode,
+                "stdout": stdout.decode("utf-8", errors="replace")[:50000],
+                "stderr": stderr.decode("utf-8", errors="replace")[:10000],
+                "duration_ms": round((time.time() - t0) * 1000),
+                "sandbox": "local_dev",
+            }
+        except asyncio.TimeoutError:
+            return {"success": False, "error": f"Local timeout after {timeout}s", "sandbox": "local_dev"}
+        except Exception as e:
+            raise SandboxExecutionError(f"Local execution failed: {e}")

@@ -8,6 +8,7 @@ Provides automatic instrumentation for:
 - Tool executions
 - LLM API calls
 """
+import asyncio
 import functools
 import logging
 import os
@@ -19,14 +20,27 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION, DEPLOYMENT_ENVIRONMENT
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry.instrumentation.redis import RedisInstrumentor
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from opentelemetry.propagators.composite import CompositePropagator
-from opentelemetry.propagators.b3 import B3Format
-from opentelemetry.propagators.jaeger import JaegerPropagator
+
+# Optional instrumentations - gracefully handle if not installed
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    FASTAPI_INST_AVAILABLE = True
+except ImportError:
+    FASTAPI_INST_AVAILABLE = False
+
+try:
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+    SQLALCHEMY_INST_AVAILABLE = True
+except ImportError:
+    SQLALCHEMY_INST_AVAILABLE = False
+
+try:
+    from opentelemetry.instrumentation.redis import RedisInstrumentor
+    REDIS_INST_AVAILABLE = True
+except ImportError:
+    REDIS_INST_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -169,27 +183,36 @@ def traced(
 
 def instrument_fastapi(app):
     """Instrument FastAPI application."""
-    FastAPIInstrumentor.instrument_app(
-        app,
-        excluded_urls="/health,/metrics",  # Don't trace health checks
-    )
-    logger.info("[Tracing] FastAPI instrumented")
+    if FASTAPI_INST_AVAILABLE:
+        FastAPIInstrumentor.instrument_app(
+            app,
+            excluded_urls="/health,/metrics",  # Don't trace health checks
+        )
+        logger.info("[Tracing] FastAPI instrumented")
+    else:
+        logger.debug("[Tracing] FastAPI instrumentation not available")
 
 
 def instrument_sqlalchemy(engine):
     """Instrument SQLAlchemy engine."""
-    SQLAlchemyInstrumentor().instrument(
-        engine=engine,
-        enable_commenter=True,
-        commenter_options={},
-    )
-    logger.info("[Tracing] SQLAlchemy instrumented")
+    if SQLALCHEMY_INST_AVAILABLE:
+        SQLAlchemyInstrumentor().instrument(
+            engine=engine,
+            enable_commenter=True,
+            commenter_options={},
+        )
+        logger.info("[Tracing] SQLAlchemy instrumented")
+    else:
+        logger.debug("[Tracing] SQLAlchemy instrumentation not available")
 
 
 def instrument_redis():
     """Instrument Redis client."""
-    RedisInstrumentor().instrument()
-    logger.info("[Tracing] Redis instrumented")
+    if REDIS_INST_AVAILABLE:
+        RedisInstrumentor().instrument()
+        logger.info("[Tracing] Redis instrumented")
+    else:
+        logger.debug("[Tracing] Redis instrumentation not available")
 
 
 class TracedMessageProcessor:
@@ -286,7 +309,3 @@ class MetricsCollector:
 
 # Global metrics instance
 metrics = MetricsCollector()
-
-
-# Import asyncio at the end to avoid circular imports
-import asyncio

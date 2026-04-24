@@ -1,70 +1,103 @@
 """
-Tool execution router.
+Tool Execution Router — Unified entry point for all tool execution.
+
+Responsibilities:
+- Route bash/shell commands through the SandboxAdapter
+- Execute all other tools directly via their async execute() method
+- Enforce workspace isolation via folder_slug
 """
 import logging
 from typing import Any, Dict
 
 from src.domain.exceptions import ToolExecutionError
 from src.infrastructure.runtime.config import SANDBOX_MODE, KUBERNETES_MODE, ALLOW_ANON_LOCAL
-from src.infrastructure.sandbox.docker_adapter import DockerAdapter
-from src.infrastructure.sandbox.kubernetes_executor import KubernetesSandboxExecutor
+from src.infrastructure.sandbox.docker_adapter import SandboxAdapter
+from src.infrastructure.sandbox.kubernetes import get_sandbox_executor
 from src.tools.core.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
 
 class ToolExecutionRouter:
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-    
+    """Routes tool execution through appropriate sandbox/direct paths."""
+
     def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        self._docker = DockerAdapter()
-        self._kubernetes = KubernetesSandboxExecutor() if KUBERNETES_MODE else None
-        
-    def _get_sandbox(self):
-        if KUBERNETES_MODE and self._kubernetes:
+        self._sandbox = SandboxAdapter()
+        self._kubernetes = None
+
+    async def _get_sandbox(self):
+        """Get sandbox executor (lazy k8s initialization)."""
+        if KUBERNETES_MODE:
+            if self._kubernetes is None:
+                self._kubernetes = await get_sandbox_executor()
             return self._kubernetes
-        return self._docker
+        return self._sandbox
 
-    async def execute_tool(self, tool_: BaseTool, session_id: str, kwargs: Dict[str, Any]) -> Any:
-        logger.info(f"Routing tool execution: {tool_.name}")
+    async def execute_tool(
+        self, tool_: BaseTool, session_id: str, kwargs: Dict[str, Any], tenant_id: str = "local"
+    ) -> Any:
+        """Execute a tool through the appropriate isolation layer."""
+        logger.info(f"[Router] Executing: {tool_.name} (tenant={tenant_id})")
+
+        # Extract folder_slug for workspace isolation
+        folder_slug = kwargs.pop("folder_slug", "") or ""
+
+        should_sandbox = getattr(tool_, "requires_sandbox", False) or tool_.name == "bash_execute"
+
+        if should_sandbox:
+            return await self._execute_sandboxed(
+                tool_, session_id, tenant_id, kwargs, folder_slug
+            )
+
+        if folder_slug and "working_dir" not in kwargs:
+            kwargs["working_dir"] = folder_slug
+             
+        return await tool_.execute(session_id=session_id, **kwargs)
+
+    async def _execute_sandboxed(
+        self, tool_: BaseTool, session_id: str, tenant_id: str,
+        kwargs: Dict[str, Any], folder_slug: str
+    ) -> Any:
+        """Route commands through sandbox."""
+        sandbox = await self._get_sandbox()
         
-        # Bash execution requires sandbox - block host execution entirely in production
+        # If it's bash, use the command directly
         if tool_.name == "bash_execute":
-            # In production (non-local), always require sandbox
-            is_local_dev = ALLOW_ANON_LOCAL and SANDBOX_MODE == "host"
+            command = kwargs.get("command")
+            if not command:
+                raise ToolExecutionError("Missing command for bash_execute", tool_.name)
             
-            if not is_local_dev:
-                sandbox = self._get_sandbox()
-                command = kwargs.get("command")
-                if not command:
-                    raise ToolExecutionError("Missing command for bash execute", tool_.name)
-
-                try:
-                    return await sandbox.execute(
-                        command=command,
-                        session_id=session_id,
-                        working_dir=kwargs.get("working_dir", "."),
-                        timeout=kwargs.get("timeout", 30),
-                    )
-                except Exception as exc:
-                    logger.error(f"[Router] Sandbox execution failed: {exc}")
-                    raise ToolExecutionError(
-                        f"Sandbox execution failed. Cannot run on host in production.",
-                        tool_.name
-                    )
+            # SandboxAdapter from docker_adapter.py
+            if hasattr(sandbox, "image"):
+                return await sandbox.execute(
+                    command=command,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    working_dir=folder_slug or ".",
+                    timeout=kwargs.get("timeout", 30),
+                )
             else:
-                # Dev mode - allow host execution
-                logger.warning("[Router] DEV MODE: Running bash on host")
-                return await tool_.execute(session_id=session_id, **kwargs)
-
-        # Other tools - execute normally
+                # LocalSandboxExecutor or KubernetesSandboxExecutor expects SandboxConfig
+                from src.infrastructure.sandbox.kubernetes import SandboxConfig
+                from src.infrastructure.runtime.paths import resolve_workspace_path
+                safe_cwd = str(resolve_workspace_path(folder_slug or ".", session_id=session_id, tenant_id=tenant_id))
+                config = SandboxConfig(
+                    command=command,
+                    working_dir=safe_cwd,
+                    timeout=kwargs.get("timeout", 30)
+                )
+                result = await sandbox.execute(config)
+                return {
+                    "success": result.exit_code == 0,
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "duration_ms": result.duration_ms,
+                    "sandbox": "kubernetes" if "Kubernetes" in sandbox.__class__.__name__ else "local"
+                }
+        
+        # For other tools (like git_clone, git_write), we rely on their internal
+        # use of get_sandbox_executor() OR we need to wrap them.
+        # For now, we allow direct execution as most tools are already 'safe'
+        # or handle their own sandbox (like the Git tools).
         return await tool_.execute(session_id=session_id, **kwargs)

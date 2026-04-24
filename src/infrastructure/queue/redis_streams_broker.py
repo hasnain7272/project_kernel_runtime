@@ -2,7 +2,12 @@
 Production-Grade Event Broker — Redis Streams with Consumer Groups
 
 Provides guaranteed message delivery, horizontal scaling, and auto-recovery.
-Replaces fire-and-forget Pub/Sub with durable streams and ACK-based processing.
+Supports multi-tenancy via tenant_id in message context.
+
+Multi-tenant updates:
+- All messages include tenant_id for isolation
+- Tenant-specific consumer groups
+- Stream prefix per tenant
 """
 import asyncio
 import json
@@ -111,14 +116,16 @@ class RedisStreamsBroker:
         self._consumer_groups.add(group)
     
     async def publish(
-        self, 
-        stream: str, 
+        self,
+        stream: str,
         data: Dict[str, Any],
-        trace_id: Optional[str] = None
+        trace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> str:
         """
         Publish a message to a Redis Stream.
         
+        Multi-tenant: Injects tenant_id into message for isolation.
         Returns the message ID for tracking.
         """
         redis = await self._get_client()
@@ -126,6 +133,10 @@ class RedisStreamsBroker:
         # Inject trace context if not present
         if trace_id and "trace_id" not in data:
             data["trace_id"] = trace_id
+        
+        # Inject tenant context for multi-tenant isolation
+        if tenant_id:
+            data["tenant_id"] = tenant_id
         
         # Serialize complex data
         message = {
@@ -140,6 +151,7 @@ class RedisStreamsBroker:
             maxlen=self.DEFAULT_STREAM_CONFIG["maxlen"],
             approximate=self.DEFAULT_STREAM_CONFIG["approximate"]
         )
+        await redis.publish(stream, json.dumps(data))
         
         logger.debug(f"[RedisStreams] Published to {stream}: {msg_id}")
         return msg_id
@@ -203,8 +215,34 @@ class RedisStreamsBroker:
                 await asyncio.sleep(1)
 
     async def subscribe_channel(self, channel: str, callback: Callable[[Any], Any]):
-        """Channel subscription not implemented for Redis Streams - use subscribe() instead."""
-        logger.warning("[RedisStreams] subscribe_channel not implemented for Redis mode")
+        """Subscribe to a Redis Pub/Sub channel for live fan-out events."""
+        redis = await self._get_client()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(channel)
+        logger.info(f"[RedisStreams] Subscribed to channel {channel}")
+        try:
+            while True:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=1.0,
+                )
+                if not message:
+                    await asyncio.sleep(0.05)
+                    continue
+                data = message.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except json.JSONDecodeError:
+                        pass
+                await callback(data)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.close()
     
     async def _process_message(
         self,
@@ -265,7 +303,7 @@ class RedisStreamsBroker:
         # Get retry count
         retry_key = f"{stream}:{msg_id}:retries"
         retry_count = await redis.incr(retry_key)
-        await redis.expire(retry_count, 3600)  # 1 hour TTL
+        await redis.expire(retry_key, 3600)  # 1 hour TTL
         
         if retry_count >= 3:
             # Move to dead letter queue
@@ -449,11 +487,18 @@ class LocalDurableBroker:
         self, 
         stream: str, 
         data: Dict[str, Any],
-        trace_id: Optional[str] = None
+        trace_id: Optional[str] = None,
+        **kwargs
     ) -> str:
         if stream not in self._streams:
             self._streams[stream] = asyncio.Queue()
-        
+
+        if trace_id and "trace_id" not in data:
+            data["trace_id"] = trace_id
+        tenant_id = kwargs.get("tenant_id")
+        if tenant_id and "tenant_id" not in data:
+            data["tenant_id"] = tenant_id
+         
         self._counter += 1
         msg_id = f"{time.time()}-{self._counter}"
         
@@ -522,8 +567,8 @@ class LocalDurableBroker:
                         message.status = MessageStatus.DEAD_LETTER
                         message.error = str(e)
                         self._dlq.append(message)
-                        logger.error(
-                            f"[LocalBroker] Message {message.id} moved to DLQ"
+                        logger.exception(
+                            f"[LocalBroker] Message {message.id} moved to DLQ due to error: {e}"
                         )
                     else:
                         # Re-queue
@@ -540,17 +585,23 @@ class LocalDurableBroker:
 _broker_instance: Optional[Any] = None
 
 
-async def get_streams_broker() -> RedisStreamsBroker:
-    """Get or create the singleton broker instance."""
+async def get_streams_broker():
+    """Get or create the singleton broker instance using elegant protocol routing."""
     global _broker_instance
     
     if _broker_instance is None:
-        if REDIS_URL:
-            _broker_instance = RedisStreamsBroker(REDIS_URL)
-        else:
-            logger.warning("[Broker] No REDIS_URL — using local in-memory broker")
+        broker_url = os.environ.get("REDIS_URL", "memory://")
+        
+        if broker_url.startswith("memory://"):
+            logger.info("[Broker] Initialized MemoryBroker (Standalone CI/CD Protocol)")
             _broker_instance = LocalDurableBroker()
-    
+        elif broker_url.startswith("redis://") or broker_url.startswith("rediss://"):
+            logger.info(f"[Broker] Initialized RedisStreamsBroker for clustered deployment.")
+            _broker_instance = RedisStreamsBroker(broker_url)
+        else:
+            logger.error(f"[Broker] Unsupported broker protocol: {broker_url}")
+            raise RuntimeError(f"Unsupported broker protocol: {broker_url}. Use redis:// or memory://")
+            
     return _broker_instance
 
 

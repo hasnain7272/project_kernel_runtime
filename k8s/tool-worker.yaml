@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antigravity-tool-worker
+  namespace: antigravity
+  labels:
+    app: antigravity-tool-worker
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: antigravity-tool-worker
+  template:
+    metadata:
+      labels:
+        app: antigravity-tool-worker
+    spec:
+      serviceAccountName: antigravity-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: worker
+          image: antigravity/runtime:3.0.0
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.services.agent_loop.tool_worker"]
+          envFrom:
+            - configMapRef:
+                name: antigravity-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: antigravity-secrets
+                  key: DB_PASSWORD
+            - name: WORKER_CONSUMER_GROUP
+              value: "tool-workers"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import sys; sys.exit(0)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: antigravity-tool-worker-hpa
+  namespace: antigravity
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: antigravity-tool-worker
+  minReplicas: 5
+  maxReplicas: 50
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: redis_stream_pending
+          selector:
+            matchLabels:
+              stream: execution_queue
+        target:
+          type: AverageValue
+          averageValue: "50"
