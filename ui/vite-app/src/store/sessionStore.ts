@@ -18,6 +18,8 @@ interface SessionState {
   userEmail: string;
   userRole: string;
   workspaces: Workspace[];
+  plugins: { name: string; url: string }[];
+  activeSkills: string[];
   status: 'idle' | 'connecting' | 'active' | 'error';
 
   // Actions
@@ -25,6 +27,9 @@ interface SessionState {
   setUser: (email: string, role?: string) => void;
   setStatus: (s: SessionState['status']) => void;
   setWorkspaces: (w: Workspace[]) => void;
+  addPlugin: (plugin: { name: string; url: string }) => void;
+  removePlugin: (name: string) => void;
+  toggleSkill: (skillId: string) => void;
   ensureSession: (workspaces?: Workspace[]) => Promise<void>;
   addWorkspace: (ws: Workspace) => Promise<void>;
   removeWorkspace: (slug: string) => Promise<void>;
@@ -39,12 +44,22 @@ export const useSessionStore = create<SessionState>()(
       userEmail: '',
       userRole: 'developer',
       workspaces: [],
+      plugins: [],
+      activeSkills: [],
       status: 'idle',
 
       setSessionId: (id) => set({ sessionId: id, status: 'active' }),
       setUser: (email, role) => set({ userEmail: email, userRole: role || 'developer' }),
       setStatus: (status) => set({ status }),
       setWorkspaces: (workspaces) => set({ workspaces }),
+      
+      addPlugin: (plugin) => set(s => ({ plugins: [...s.plugins.filter(p => p.name !== plugin.name), plugin] })),
+      removePlugin: (name) => set(s => ({ plugins: s.plugins.filter(p => p.name !== name) })),
+      toggleSkill: (skillId) => set(s => ({
+        activeSkills: s.activeSkills.includes(skillId) 
+          ? s.activeSkills.filter(id => id !== skillId) 
+          : [...s.activeSkills, skillId]
+      })),
 
       ensureSession: async (workspaces?: Workspace[]) => {
         const token = localStorage.getItem('auth_token');
@@ -128,6 +143,8 @@ export const useSessionStore = create<SessionState>()(
           userEmail: '',
           userRole: 'developer',
           workspaces: [],
+          plugins: [],
+          activeSkills: [],
           status: 'idle',
         }),
     }),

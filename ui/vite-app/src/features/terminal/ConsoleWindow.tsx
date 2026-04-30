@@ -30,11 +30,23 @@ export function ConsoleWindow() {
 
     term.writeln('\x1b[38;5;39m[ANTIGRAVITY OS v3.0]\x1b[0m Kernel attached.');
     
-    const handleResize = () => fitAddon.fit();
-    window.addEventListener('resize', handleResize);
+    const resizeObserver = new ResizeObserver(() => {
+      try {
+        fitAddon.fit();
+      } catch (e) {
+        // Ignore fit errors if container is completely hidden
+      }
+    });
+    
+    // Slight delay to allow parent flex container to compute dimensions before first fit
+    setTimeout(() => {
+      try { fitAddon.fit(); } catch(e) {}
+    }, 100);
+
+    resizeObserver.observe(terminalRef.current);
     
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       term.dispose();
     };
   }, []);
