@@ -43,9 +43,12 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down worker...")
         worker_task.cancel()
         try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+            # Give worker 5 seconds to clean up
+            await asyncio.wait_for(worker_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            logger.warning("Worker shutdown timed out or was cancelled.")
+        except Exception as e:
+            logger.error(f"Error during worker shutdown: {e}")
 
     logger.info("Gateway shutdown.")
 
@@ -119,11 +122,19 @@ if os.path.exists(STATIC_DIR):
 
 @app.get("/{full_path:path}")
 async def serve_spa(request: Request, full_path: str):
-    """Serve SPA frontend."""
+    """Serve SPA frontend with no-cache headers for index.html."""
     if full_path.startswith("api/"):
         return {"detail": "Not Found"}
 
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path)
+        return FileResponse(
+            index_path,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     return {"detail": "Dashboard not built"}
+

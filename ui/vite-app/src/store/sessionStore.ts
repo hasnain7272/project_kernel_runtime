@@ -1,153 +1,42 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { apiClient } from '@/api/client';
+import { createSessionActions } from './sessionActions';
+import type { SessionState, Workspace } from './sessionTypes';
 
-// ── Types ──
+export type { Workspace } from './sessionTypes';
 
-export interface Workspace {
-  type: 'local' | 'git';
-  slug: string;
-  path?: string;
-  url?: string;
-  branch?: string;
-}
-
-interface SessionState {
-  sessionId: string;
-  tenantId: string;
-  userEmail: string;
-  userRole: string;
-  workspaces: Workspace[];
-  plugins: { name: string; url: string }[];
-  activeSkills: string[];
-  status: 'idle' | 'connecting' | 'active' | 'error';
-
-  // Actions
-  setSessionId: (id: string) => void;
-  setUser: (email: string, role?: string) => void;
-  setStatus: (s: SessionState['status']) => void;
-  setWorkspaces: (w: Workspace[]) => void;
-  addPlugin: (plugin: { name: string; url: string }) => void;
-  removePlugin: (name: string) => void;
-  toggleSkill: (skillId: string) => void;
-  ensureSession: (workspaces?: Workspace[]) => Promise<void>;
-  addWorkspace: (ws: Workspace) => Promise<void>;
-  removeWorkspace: (slug: string) => Promise<void>;
-  reset: () => void;
-}
+const initialState = {
+  sessionId: '',
+  tenantId: '',
+  userEmail: '',
+  userRole: 'developer',
+  workspaces: [],
+  plugins: [],
+  activeSkills: [],
+  status: 'idle' as const,
+  llmConfig: { model: 'gpt-4o', api_key: '', base_url: '', extra_body: '' },
+  llmPreset: 'openai',
+};
 
 export const useSessionStore = create<SessionState>()(
   persist(
-    (set, get) => ({
-      sessionId: '',
-      tenantId: '',
-      userEmail: '',
-      userRole: 'developer',
-      workspaces: [],
-      plugins: [],
-      activeSkills: [],
-      status: 'idle',
-
-      setSessionId: (id) => set({ sessionId: id, status: 'active' }),
-      setUser: (email, role) => set({ userEmail: email, userRole: role || 'developer' }),
-      setStatus: (status) => set({ status }),
-      setWorkspaces: (workspaces) => set({ workspaces }),
-      
-      addPlugin: (plugin) => set(s => ({ plugins: [...s.plugins.filter(p => p.name !== plugin.name), plugin] })),
-      removePlugin: (name) => set(s => ({ plugins: s.plugins.filter(p => p.name !== name) })),
-      toggleSkill: (skillId) => set(s => ({
-        activeSkills: s.activeSkills.includes(skillId) 
-          ? s.activeSkills.filter(id => id !== skillId) 
-          : [...s.activeSkills, skillId]
-      })),
-
-      ensureSession: async (workspaces?: Workspace[]) => {
-        const token = localStorage.getItem('auth_token');
-        if (!token) return;
-
-        const current = get();
-        if (current.sessionId) {
-          if (!current.tenantId) set({ tenantId: 'local' });
-          return;
-        }
-        set({ status: 'connecting' });
-
-        try {
-          const payload = {
-            name: 'New Session',
-            mode: 'web',
-            workspaces: workspaces || current.workspaces || [],
-          };
-
-          const res = await apiClient.post<{
-            id: string;
-            tenant_id: string;
-            workspaces: Workspace[];
-          }>('/sessions/', payload);
-
-          if (res.data?.id) {
-            const ws = res.data.workspaces || [];
-            set({
-              sessionId: res.data.id,
-              tenantId: res.data.tenant_id || '',
-              workspaces: ws,
-              status: 'active',
-            });
-          } else {
-            set({ status: 'error' });
-          }
-        } catch (err) {
-          console.error('[Session] Failed to create session:', err);
-          set({ status: 'error' });
-        }
-      },
-
-      addWorkspace: async (ws: Workspace) => {
-        const { sessionId } = get();
-        if (!sessionId) return;
-
-        try {
-          const res = await apiClient.post<{
-            workspaces: Workspace[];
-          }>(`/sessions/${sessionId}/workspaces`, { workspace: ws });
-
-          if (res.data?.workspaces) {
-            set({ workspaces: res.data.workspaces });
-          }
-        } catch (err) {
-          console.error('[Session] Failed to add workspace:', err);
-        }
-      },
-
-      removeWorkspace: async (slug: string) => {
-        const { sessionId } = get();
-        if (!sessionId) return;
-
-        try {
-          const res = await apiClient.delete<{
-            workspaces: Workspace[];
-          }>(`/sessions/${sessionId}/workspaces/${slug}`);
-
-          if (res.data?.workspaces) {
-            set({ workspaces: res.data.workspaces });
-          }
-        } catch (err) {
-          console.error('[Session] Failed to remove workspace:', err);
-        }
-      },
-
-      reset: () =>
-        set({
-          sessionId: '',
-          tenantId: '',
-          userEmail: '',
-          userRole: 'developer',
-          workspaces: [],
-          plugins: [],
-          activeSkills: [],
-          status: 'idle',
-        }),
+    (set, get, store) => ({
+      ...initialState,
+      ...createSessionActions(set, get, store),
     }),
-    { name: 'ag-session' },
+    {
+      name: 'ag-session',
+      partialize: (state) => ({
+        sessionId: state.sessionId,
+        tenantId: state.tenantId,
+        userEmail: state.userEmail,
+        userRole: state.userRole,
+        workspaces: state.workspaces,
+        plugins: state.plugins,
+        activeSkills: state.activeSkills,
+        llmConfig: state.llmConfig,
+        llmPreset: state.llmPreset,
+      }),
+    },
   ),
 );

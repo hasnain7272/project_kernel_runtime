@@ -21,3 +21,9 @@ def include_routers(app: FastAPI):
     app.include_router(workspace_module.router)
     import src.api.rest.routers.mcp_plugins as mcp_plugins_module
     app.include_router(mcp_plugins_module.router)
+    import src.api.rest.routers.mcp_plugins_info as mcp_plugins_info_module
+    app.include_router(mcp_plugins_info_module.router)
+    import src.api.rest.routers.mcp_stdio as mcp_stdio_module
+    app.include_router(mcp_stdio_module.router)
+    import src.api.rest.routers.mcp_stdio_info as mcp_stdio_info_module
+    app.include_router(mcp_stdio_info_module.router)

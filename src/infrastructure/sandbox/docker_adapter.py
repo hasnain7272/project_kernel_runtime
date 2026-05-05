@@ -110,17 +110,31 @@ class SandboxAdapter:
         t0: float,
     ) -> Dict[str, Any]:
         """Execute in an isolated Docker container."""
+        # Optional: Enable Docker-outside-of-Docker (DooD)
+        enable_dood = os.environ.get("ENABLE_SANDBOX_DOCKER", "false").lower() == "true"
+        docker_socket = os.environ.get("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
+
+        # Set network mode
+        actual_network = "bridge" if enable_dood else network
+
         docker_args = [
             "docker", "run", "--rm",
             f"--memory={memory_mb}m",
-            f"--network={network}",
+            f"--network={actual_network}",
             "--pids-limit", "256",
-            "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        ]
+
+        if not enable_dood:
+            docker_args.append("--read-only")
+            docker_args.extend(["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"])
+        else:
+            docker_args.extend(["-v", f"{docker_socket}:{docker_socket}"])
+
+        docker_args.extend([
             "-v", f"{os.path.abspath(workspace)}:/workspace:rw",
             "-w", container_workdir,
             self.image, "/bin/sh", "-c", command,
-        ]
+        ])
 
         try:
             proc = await asyncio.create_subprocess_exec(

@@ -14,16 +14,25 @@ interface Props { open: boolean; onClose: () => void; targetSessionId?: string; 
 
 export function ProviderSettingsModal({ open, onClose, targetSessionId }: Props) {
   const activeSessionId = useSessionStore(s => s.sessionId);
+  const llmConfig = useSessionStore(s => s.llmConfig);
+  const llmPreset = useSessionStore(s => s.llmPreset);
+  const setLlmConfig = useSessionStore(s => s.setLlmConfig);
+  const setLlmPreset = useSessionStore(s => s.setLlmPreset);
   const sessionId = targetSessionId || activeSessionId;
-  
+
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [preset, setPreset] = useState(PRESETS[0].id);
-  const [config, setConfig] = useState({ model: 'gpt-4o', api_key: '', base_url: '', extra_body: '' });
+  const [preset, setPreset] = useState(llmPreset || PRESETS[0].id);
+  const [config, setConfig] = useState(llmConfig);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [existingKey, setExistingKey] = useState('');
+
+  useEffect(() => {
+    setConfig(llmConfig);
+    setPreset(llmPreset || PRESETS[0].id);
+  }, [llmConfig, llmPreset]);
 
   const loadConfig = useCallback(async () => {
     if (!sessionId) return;
@@ -32,7 +41,12 @@ export function ProviderSettingsModal({ open, onClose, targetSessionId }: Props)
       if (res.data) {
         setExistingKey(res.data.api_key_masked || '');
         if (res.data.model) {
-          setConfig(c => ({ ...c, model: res.data.model || c.model, base_url: res.data.base_url || '' }));
+          setConfig(c => ({
+            ...c,
+            model: res.data.model || c.model,
+            base_url: res.data.base_url || c.base_url || '',
+            api_key: '',
+          }));
           const match = PRESETS.find(p => p.model === res.data.model);
           if (match) setPreset(match.id); else setPreset('custom');
         }
@@ -58,10 +72,16 @@ export function ProviderSettingsModal({ open, onClose, targetSessionId }: Props)
     try {
       const payload: Record<string, any> = { model: config.model, base_url: config.base_url || undefined };
       if (config.api_key) payload.api_key = config.api_key;
-      
+
       const res = await apiClient.patch<any>(`/sessions/${sessionId}/config`, payload);
-      if (res.status === 'success' || res.data?.status === 'config_updated') { 
-        setSaved(true); setConfig(c => ({ ...c, api_key: '' })); setTimeout(() => setSaved(false), 2000); loadConfig();
+      if (res.status === 'success' || res.data?.status === 'config_updated') {
+        setSaved(true);
+        setLlmConfig({ ...config, api_key: config.api_key ? config.api_key : llmConfig.api_key });
+        setLlmPreset(preset);
+        localStorage.setItem('llm_config', JSON.stringify({ config, preset }));
+        setConfig(c => ({ ...c, api_key: '' }));
+        setTimeout(() => setSaved(false), 2000);
+        loadConfig();
       } else {
         setError(res.error || 'Failed to save.');
       }
@@ -90,7 +110,15 @@ export function ProviderSettingsModal({ open, onClose, targetSessionId }: Props)
         </div>
 
         <div className="flex-1 overflow-y-auto max-h-[70vh] custom-scrollbar">
-          <LLMSettings preset={preset} setPreset={setPreset} config={config} setConfig={setConfig} existingKey={existingKey} showKey={showKey} setShowKey={setShowKey} />
+          <LLMSettings
+            preset={preset}
+            setPreset={setPreset}
+            config={config}
+            setConfig={setConfig}
+            existingKey={existingKey}
+            showKey={showKey}
+            setShowKey={setShowKey}
+          />
           <div className="mx-6 my-4 h-px bg-slate-800/60" />
           <GitSettings />
           <div className="mx-6 my-4 h-px bg-slate-800/60" />

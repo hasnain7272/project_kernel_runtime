@@ -36,22 +36,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=4.1.0",
     "ruff>=0.6",
     "mypy>=1.7.0",
-    "testcontainers>=3.7.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 120

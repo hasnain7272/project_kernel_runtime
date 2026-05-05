@@ -19,14 +19,17 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function MainApp() {
   const ensureSession = useSessionStore((s) => s.ensureSession);
+  const initLlmFromStorage = useSessionStore((s) => s.initLlmFromStorage);
   const status = useSessionStore((s) => s.status);
+  const sessionId = useSessionStore((s) => s.sessionId);
   const token = localStorage.getItem('auth_token');
 
   useEffect(() => {
     if (token && window.location.pathname !== '/login') {
+      initLlmFromStorage();
       ensureSession();
     }
-  }, [ensureSession, token]);
+  }, [ensureSession, initLlmFromStorage, token]);
 
   if (token && status === 'connecting') {
     return (

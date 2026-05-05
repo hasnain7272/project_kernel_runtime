@@ -1,23 +1,89 @@
+import { useState, useEffect } from 'react';
+import { GitBranch, Key, Lock, Check, Loader2 } from 'lucide-react';
+import { apiClient } from '@/api/client';
+import { useSessionStore } from '@/store/sessionStore';
 import { GitHubConnectButton } from '@/features/github/GitHubConnectButton';
 
 export function GitSettings() {
+  const sessionId = useSessionStore(s => s.sessionId);
+  const [token, setToken] = useState('');
+  const [maskedToken, setMaskedToken] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    apiClient.get<any>(`/sessions/${sessionId}/config`).then(res => {
+      if (res.data?.github_token_masked) setMaskedToken(res.data.github_token_masked);
+    });
+  }, [sessionId]);
+
+  const handleSaveToken = async () => {
+    if (!sessionId || !token) return;
+    setSaving(true);
+    try {
+      await apiClient.patch(`/sessions/${sessionId}/config`, { github_token: token });
+      setSaved(true);
+      setToken('');
+      setTimeout(() => setSaved(false), 2000);
+      const res = await apiClient.get<any>(`/sessions/${sessionId}/config`);
+      if (res.data?.github_token_masked) setMaskedToken(res.data.github_token_masked);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="p-6 pt-2">
       <label className="mb-4 flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest text-slate-500/80">
-        <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-        </svg>
+        <GitBranch className="h-3 w-3" />
         GitHub Integration
       </label>
-      <div className="rounded-xl border border-dashed border-slate-700 bg-slate-800/30 p-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h4 className="text-xs font-semibold text-slate-200">Connect GitHub</h4>
-            <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
-              Allow Antigravity to clone repositories and push changes on your behalf.
-            </p>
+      
+      <div className="space-y-4">
+        {/* OAuth Option */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h4 className="text-xs font-semibold text-slate-200">Connect via OAuth</h4>
+              <p className="mt-1 text-[10px] text-slate-500 leading-relaxed">
+                Fastest way to link repositories. Requires server-side configuration.
+              </p>
+            </div>
+            <GitHubConnectButton />
           </div>
-          <GitHubConnectButton />
+        </div>
+
+        {/* PAT Option */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+          <div className="flex items-center gap-2 mb-3">
+             <Key className="h-3.5 w-3.5 text-cyan-400" />
+             <h4 className="text-xs font-semibold text-slate-200">Personal Access Token</h4>
+          </div>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Lock className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
+              <input
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={maskedToken || "ghp_xxxxxxxxxxxx"}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-4 text-xs text-slate-200 focus:border-cyan-500/50 focus:outline-none transition-all"
+              />
+            </div>
+            <button
+              onClick={handleSaveToken}
+              disabled={saving || !token}
+              className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-all border border-slate-700"
+            >
+              {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : saved ? <Check className="h-3 w-3 text-green-400" /> : 'Save'}
+            </button>
+          </div>
+          <p className="mt-2 text-[9px] text-slate-600">
+            Tokens are encrypted and session-isolated. Recommended for local development.
+          </p>
         </div>
       </div>
     </div>

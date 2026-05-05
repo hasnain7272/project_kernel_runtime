@@ -1,8 +1,5 @@
 /**
  * DashboardLayout — SaaS-grade Agentic IDE Layout
- *
- * Implements a bifurcated Antigravity/Codex style layout:
- * [File Explorer] | [Command Center / Terminal] | [Mission Control / Chat]
  */
 import { useState } from 'react';
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels';
@@ -14,11 +11,14 @@ import { FileExplorer } from '@/features/workspace/FileExplorer';
 import { ConsoleWindow } from '@/features/terminal/ConsoleWindow';
 import { WorkspaceManager } from '@/components/WorkspaceManager';
 import { CapabilityStudio } from '@/features/capabilities/CapabilityStudio';
+import { CapabilitySidebarPanel } from '@/features/capabilities/CapabilityStudio/SidebarPanel';
+import { Files, Zap, Shield, Layout } from 'lucide-react';
 
 export function DashboardLayout() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [showFileExplorer, setShowFileExplorer] = useState(true);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<'files'|'capabilities'|'system'>('files');
   const [showWorkspaceModal, setShowWorkspaceModal] = useState(false);
   const [showCapabilityStudio, setShowCapabilityStudio] = useState(false);
   const [settingsTargetSession, setSettingsTargetSession] = useState<string | undefined>();
@@ -29,59 +29,78 @@ export function DashboardLayout() {
     setDrawerOpen(false);
   };
 
+  const openCapabilityStudio = () => setShowCapabilityStudio(true);
+
   return (
-    <div className="flex h-screen w-full flex-col bg-slate-950 overflow-hidden font-sans">
+    <div className="flex h-screen w-full flex-col bg-slate-950 overflow-hidden font-sans selection:bg-cyan-500/30">
       <DashboardHeader
         onOpenDrawer={() => setDrawerOpen(true)}
         onOpenWorkspaceModal={() => setShowWorkspaceModal(true)}
-        showFileExplorer={showFileExplorer}
-        onToggleFileExplorer={() => setShowFileExplorer(!showFileExplorer)}
-        onOpenCapabilityStudio={() => setShowCapabilityStudio(true)}
+        showFileExplorer={showSidebar}
+        onToggleFileExplorer={() => setShowSidebar(!showSidebar)}
+        onOpenCapabilityStudio={openCapabilityStudio}
         onOpenSettings={() => handleOpenSettings()}
       />
 
-      <SessionDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        onOpenSettings={handleOpenSettings}
-      />
+      <SessionDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onOpenSettings={handleOpenSettings} />
+      <ProviderSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} targetSessionId={settingsTargetSession} />
 
-      <ProviderSettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        targetSessionId={settingsTargetSession}
-      />
-
-      {/* Main — Bifurcated Agentic Interface */}
       <main className="flex-1 overflow-hidden flex bg-slate-950">
-        <PanelGroup direction="horizontal">
-          
-          {showFileExplorer && (
+        <PanelGroup direction="horizontal" autoSaveId="dashboard-layout">
+          {showSidebar && (
             <>
-              <Panel defaultSize={20} minSize={15} maxSize={30} className="bg-slate-900/20 backdrop-blur-sm border-r border-slate-800 flex flex-col">
-                <FileExplorer />
+              <Panel defaultSize={22} minSize={18} maxSize={45} className="bg-[#0b1120] border-r border-slate-800 flex">
+                {/* Slim Sidebar Navigation */}
+                <div className="w-12 border-r border-slate-800 flex flex-col items-center py-4 gap-4 bg-slate-900/30">
+                  <button onClick={() => setSidebarTab('files')} 
+                    className={`p-2 rounded-xl transition-all ${sidebarTab === 'files' ? 'bg-cyan-500/10 text-cyan-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                    <Files className="h-5 w-5" />
+                  </button>
+                  <button onClick={() => setSidebarTab('capabilities')}
+                    className={`p-2 rounded-xl transition-all ${sidebarTab === 'capabilities' ? 'bg-cyan-500/10 text-cyan-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                    <Zap className="h-5 w-5" />
+                  </button>
+                  <div className="mt-auto flex flex-col gap-4 mb-2">
+                    <button onClick={() => handleOpenSettings()} className="p-2 text-slate-600 hover:text-slate-300 transition-colors">
+                       <Shield className="h-5 w-5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sidebar Content */}
+                <div className="flex-1 flex flex-col min-w-0">
+                  <div className="h-10 px-4 flex items-center border-b border-slate-800/60 bg-slate-900/10">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                      {sidebarTab === 'files' ? 'Project Workspace' : sidebarTab === 'capabilities' ? 'Intelligence Studio' : 'System Guard'}
+                    </span>
+                  </div>
+                  <div className="flex-1 overflow-hidden">
+                    {sidebarTab === 'files' && <FileExplorer />}
+                    {sidebarTab === 'capabilities' && <CapabilitySidebarPanel onOpenStudio={openCapabilityStudio} />}
+                  </div>
+                </div>
               </Panel>
-              <PanelResizeHandle className="w-1 bg-slate-800/50 hover:bg-cyan-500/50 transition-colors cursor-col-resize" />
+              <PanelResizeHandle className="w-[1.5px] bg-slate-800/80 hover:bg-cyan-500/50 transition-colors cursor-col-resize z-10" />
             </>
           )}
 
-          {/* System Editor / Terminal Center */}
-          <Panel defaultSize={45} minSize={30} className="flex flex-col bg-[#020617] border-r border-slate-800">
-            <div className="h-8 border-b border-slate-800 flex items-center px-3 bg-slate-900/50">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">System Console</span>
+          <Panel defaultSize={48} minSize={30} className="flex flex-col bg-[#020617] border-r border-slate-800 relative shadow-inner">
+            <div className="h-10 border-b border-slate-800/60 flex items-center px-4 bg-[#0b1120]/50 justify-between">
+              <div className="flex items-center gap-2">
+                <Layout className="h-3 w-3 text-slate-500" />
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">System Console</span>
+              </div>
             </div>
             <div className="flex-1 overflow-hidden relative">
               <ConsoleWindow />
             </div>
           </Panel>
 
-          <PanelResizeHandle className="w-1 bg-slate-800/50 hover:bg-cyan-500/50 transition-colors cursor-col-resize shadow-md" />
+          <PanelResizeHandle className="w-[1.5px] bg-slate-800/80 hover:bg-cyan-500/50 transition-colors cursor-col-resize z-10 shadow-md" />
 
-          {/* Mission Control / Chat */}
-          <Panel defaultSize={35} minSize={25} className="flex flex-col bg-slate-900/30">
+          <Panel defaultSize={30} minSize={25} className="flex flex-col bg-[#0b1120]/40 backdrop-blur-sm">
             <ChatPane />
           </Panel>
-
         </PanelGroup>
       </main>
 
