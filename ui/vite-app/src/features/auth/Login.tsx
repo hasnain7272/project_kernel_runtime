@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSessionStore } from '@/store/sessionStore';
 
+import { API_BASE_URL } from '@/api/client';
+
 export function Login() {
   const navigate = useNavigate();
   const [isRegister, setIsRegister] = useState(false);
@@ -16,9 +18,10 @@ export function Login() {
     setError(null);
 
     const endpoint = isRegister ? '/api/v1/auth/register' : '/api/v1/auth/login';
+    const url = `${API_BASE_URL}${endpoint}`;
     
     try {
-      const res = await fetch(endpoint, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, name: email.split('@')[0] }),

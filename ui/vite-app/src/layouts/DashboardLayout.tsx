@@ -88,7 +88,11 @@ export function DashboardLayout() {
             <div className="h-10 border-b border-slate-800/60 flex items-center px-4 bg-[#0b1120]/50 justify-between">
               <div className="flex items-center gap-2">
                 <Layout className="h-3 w-3 text-slate-500" />
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">System Console</span>
+                <div className="flex items-center text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                  <span>System Console</span>
+                  <span className="mx-1.5 text-slate-600">/</span>
+                  <span className="text-cyan-500/70">Workspace</span>
+                </div>
               </div>
             </div>
             <div className="flex-1 overflow-hidden relative">

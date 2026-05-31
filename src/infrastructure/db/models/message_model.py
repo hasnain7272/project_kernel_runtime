@@ -6,7 +6,7 @@ Sequence handles ordering within tenant+session+task.
 """
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, Integer, ForeignKey, Index
+from sqlalchemy import String, Text, DateTime, Integer, ForeignKey, Index, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.db.session import Base
@@ -33,6 +33,7 @@ class MessageModel(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     tool_call_id: Mapped[str] = mapped_column(String, nullable=True)
     tool_calls: Mapped[dict | list] = mapped_column(Text, nullable=True) # JSON dump
+    extra_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     sequence: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

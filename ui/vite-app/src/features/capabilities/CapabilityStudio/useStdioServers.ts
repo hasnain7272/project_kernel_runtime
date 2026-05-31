@@ -17,9 +17,15 @@ export function useStdioServers(onServersChanged?: () => void) {
     setLoading(false);
   };
 
-  const register = async (form: { name: string; command: string; args: string }) => {
+  const register = async (form: { name: string; command: string; args: string; working_dir?: string }) => {
     const args = form.args.split(' ').filter(Boolean);
-    await apiClient.post('/mcp/stdio/register', { name: form.name, command: form.command, args, description: `Stdio MCP: ${form.name}` });
+    await apiClient.post('/mcp/stdio/register', {
+      name: form.name,
+      command: form.command,
+      args,
+      working_dir: form.working_dir || undefined,
+      description: `Stdio MCP: ${form.name}`
+    });
     await loadServers();
     onServersChanged?.();
   };

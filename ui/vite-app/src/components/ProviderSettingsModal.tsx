@@ -35,26 +35,42 @@ export function ProviderSettingsModal({ open, onClose, targetSessionId }: Props)
   }, [llmConfig, llmPreset]);
 
   const loadConfig = useCallback(async () => {
-    if (!sessionId) return;
     try {
-      const res = await apiClient.get<any>(`/sessions/${sessionId}/config`);
-      if (res.data) {
-        setExistingKey(res.data.api_key_masked || '');
-        if (res.data.model) {
-          setConfig(c => ({
-            ...c,
-            model: res.data.model || c.model,
-            base_url: res.data.base_url || c.base_url || '',
-            api_key: '',
-          }));
-          const match = PRESETS.find(p => p.model === res.data.model);
-          if (match) setPreset(match.id); else setPreset('custom');
-        }
+      const res = await apiClient.get<any>(`/settings/byok`);
+      const list = res.data?.data || [];
+      const activeId = useSessionStore.getState().activeModelId || PRESETS[0].id;
+      
+      const currentByom = list.find((b: any) => b.id === activeId);
+      if (currentByom) {
+        setExistingKey(currentByom.is_configured ? 'Stored in backend' : '');
+        setConfig(c => ({
+          ...c,
+          model: currentByom.model || c.model,
+          base_url: currentByom.base_url || '',
+          api_key: '',
+          temperature: currentByom.temperature ?? c.temperature ?? 0.2,
+          top_p: currentByom.top_p ?? c.top_p ?? 0.95,
+          max_tokens: currentByom.max_tokens ?? c.max_tokens ?? 8192,
+        }));
+        setPreset(currentByom.id);
+      } else {
+        // Active model is NOT configured yet. Let's find its default preset values!
+        const presetObj = PRESETS.find(p => p.id === activeId) || PRESETS[0];
+        setExistingKey('');
+        setConfig({
+          model: presetObj.model || '',
+          base_url: presetObj.base_url || '',
+          api_key: '',
+          temperature: presetObj.temperature ?? 0.2,
+          top_p: presetObj.top_p ?? 0.95,
+          max_tokens: presetObj.max_tokens ?? 8192,
+        });
+        setPreset(presetObj.id);
       }
     } catch (e) {
       console.error('Failed to load session config', e);
     }
-  }, [sessionId]);
+  }, []);
 
   useEffect(() => {
     const el = dialogRef.current;
@@ -67,19 +83,42 @@ export function ProviderSettingsModal({ open, onClose, targetSessionId }: Props)
   }, [open, loadConfig]);
 
   const handleSave = async () => {
-    if (!sessionId) return;
     setSaving(true); setError('');
     try {
-      const payload: Record<string, any> = { model: config.model, base_url: config.base_url || undefined };
-      if (config.api_key) payload.api_key = config.api_key;
+      // Find preset name
+      const presetObj = PRESETS.find(p => p.id === preset) || PRESETS[0];
 
-      const res = await apiClient.patch<any>(`/sessions/${sessionId}/config`, payload);
-      if (res.status === 'success' || res.data?.status === 'config_updated') {
+      const payload: Record<string, any> = {
+        id: preset,
+        name: presetObj.label,
+        provider: presetObj.provider,
+        model: config.model,
+        api_key: config.api_key || '',
+        base_url: config.base_url || null,
+        temperature: Number(config.temperature ?? presetObj.temperature ?? 0.2),
+        top_p: Number(config.top_p ?? presetObj.top_p ?? 0.95),
+        max_tokens: Number(config.max_tokens ?? presetObj.max_tokens ?? 8192),
+      };
+
+      const res = await apiClient.post<any>(`/settings/byok`, payload);
+      if (res.status === 'success') {
         setSaved(true);
-        setLlmConfig({ ...config, api_key: config.api_key ? config.api_key : llmConfig.api_key });
+        // Only set active model id, don't store API key locally
+        useSessionStore.getState().setActiveModelId(preset);
         setLlmPreset(preset);
-        localStorage.setItem('llm_config', JSON.stringify({ config, preset }));
+        setLlmConfig({
+          model: payload.model,
+          base_url: payload.base_url || '',
+          api_key: '',
+          temperature: payload.temperature,
+          top_p: payload.top_p,
+          max_tokens: payload.max_tokens,
+        });
         setConfig(c => ({ ...c, api_key: '' }));
+        
+        // Dispatch custom settings refresh event so other components (like chat controller) reload the list
+        window.dispatchEvent(new Event('refresh-settings'));
+        
         setTimeout(() => setSaved(false), 2000);
         loadConfig();
       } else {

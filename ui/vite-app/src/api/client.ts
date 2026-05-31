@@ -16,6 +16,13 @@ export function getAuthToken() {
   return localStorage.getItem('auth_token') || '';
 }
 
+// Removed getBYOKToken: BYOM configurations are securely stored in the backend DB now.
+
+export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+export const WS_BASE_URL = import.meta.env.VITE_API_URL 
+  ? import.meta.env.VITE_API_URL.replace(/^http/, 'ws') 
+  : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+
 async function request<T>(
   method: string,
   endpoint: string,
@@ -29,10 +36,12 @@ async function request<T>(
     
     const init: RequestInit = {
       method,
+      cache: 'no-store',
       headers: {
         ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
         ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         ...(tenantId ? { 'X-Tenant-Id': tenantId } : {}),
+        'Cache-Control': 'no-cache',
         ...options.headers,
       },
     };
@@ -40,14 +49,14 @@ async function request<T>(
     if (payload !== undefined) {
       init.body = isFormData ? payload : JSON.stringify(payload);
     }
-    const response = await fetch(`/api/v1${endpoint}`, init);
+    const response = await fetch(`${API_BASE_URL}/api/v1${endpoint}`, init);
     
     // Global Auth Interceptor: Redirect to login on 401
     if (response.status === 401) {
       console.warn("[SaaS Auth] 401 Unauthorized. Redirecting to login...");
       localStorage.removeItem('auth_token');
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+      if (!window.location.hash.includes('/login')) {
+        window.location.href = '#/login';
       }
     }
 

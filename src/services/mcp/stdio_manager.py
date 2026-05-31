@@ -39,7 +39,7 @@ class StdioMCPManager(
         self._tool_name_to_server: Dict[str, str] = {}
         self._health_check_task: Optional[asyncio.Task] = None
         self._health_check_interval = 30.0
-        self._max_restart_attempts = 1
+        self._max_restart_attempts = 5
         
         self._initialized = True
 

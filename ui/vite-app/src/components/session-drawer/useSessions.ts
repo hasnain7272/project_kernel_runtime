@@ -46,6 +46,7 @@ export function useSessions(onClose: () => void, onOpenSettings: (sessionId: str
     if (id === currentSessionId) return;
     setSessionId(id);
     clearTasks();
+    localStorage.removeItem(`ag-chat-${currentSessionId}`);
     onClose();
   };
 

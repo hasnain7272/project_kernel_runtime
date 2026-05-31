@@ -1,5 +1,8 @@
+import { useState } from 'react';
 import { useSessionStore } from '@/store/sessionStore';
 import { IconGit } from '@/features/workspace/WorkspaceIcons';
+import { GitHubConnectButton } from '@/features/github/GitHubConnectButton';
+import { RepoPicker } from '@/features/github/RepoPicker';
 
 interface Props {
   gitUrl: string;
@@ -13,11 +16,8 @@ interface Props {
 const branches = ['main', 'develop', 'production'];
 
 export function GitWorkspaceTab({ gitUrl, gitBranch, inputRef, onGitUrl, onGitBranch, onSubmit }: Props) {
-  const connect = () => {
-    const sid = useSessionStore.getState().sessionId;
-    const origin = window.location.origin;
-    window.location.href = `/api/v1/github/auth?session_id=${sid}&redirect_uri=${origin}/github/callback`;
-  };
+  const [showRepos, setShowRepos] = useState(false);
+  const sessionId = useSessionStore((s) => s.sessionId);
 
   return (
     <div className="wm-form">
@@ -29,8 +29,26 @@ export function GitWorkspaceTab({ gitUrl, gitBranch, inputRef, onGitUrl, onGitBr
             <p className="text-[10px] font-medium text-slate-500">Connect account or paste a repository URL</p>
           </div>
         </div>
-        <button onClick={connect} className="rounded-lg border border-slate-700/50 bg-slate-800 px-3 py-1.5 text-xs font-bold text-slate-200 transition hover:bg-slate-700">Connect</button>
+        <GitHubConnectButton sessionId={sessionId} compact />
       </div>
+      <button
+        type="button"
+        onClick={() => setShowRepos((value) => !value)}
+        className="mb-3 w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-left text-xs font-semibold text-slate-300 transition hover:border-cyan-500/30 hover:bg-slate-900"
+      >
+        {showRepos ? 'Hide connected repositories' : 'Browse connected GitHub repositories'}
+      </button>
+      {showRepos && (
+        <div className="mb-4">
+          <RepoPicker
+            onSelect={(repo) => {
+              onGitUrl(`https://github.com/${repo.full_name}.git`);
+              setShowRepos(false);
+            }}
+            onCancel={() => setShowRepos(false)}
+          />
+        </div>
+      )}
       <label className="wm-label">Repository URL</label>
       <input ref={inputRef} className="wm-input" placeholder="https://github.com/username/repository.git" value={gitUrl} onChange={(event) => onGitUrl(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && gitUrl.trim() && onSubmit()} />
       <label className="wm-label" style={{ marginTop: 12 }}>Branch</label>

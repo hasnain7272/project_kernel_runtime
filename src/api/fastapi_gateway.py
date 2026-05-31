@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from src.api.rest.config.cors import setup_cors
 from src.api.rest.routes import include_routers
@@ -25,6 +24,11 @@ async def lifespan(app: FastAPI):
     # Initialize tracing
     from src.infrastructure.observability.tracing import instrument_fastapi
     instrument_fastapi(app)
+
+    # Restore persisted MCP Stdio Servers
+    from src.services.mcp.stdio_manager import stdio_mcp_manager
+    logger.info("Restoring persisted MCP Stdio Servers...")
+    await stdio_mcp_manager.restore_persisted_servers()
 
     # Hybrid mode: Start worker in same process
     hybrid_mode = os.environ.get("HYBRID_MODE", "true").lower() == "true"
@@ -114,27 +118,6 @@ async def metrics():
     return {"metrics": metrics.get_metrics()}
 
 
-# Static files (SPA)
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "../..", "ui", "vite-app", "dist")
-if os.path.exists(STATIC_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
-
-
-@app.get("/{full_path:path}")
-async def serve_spa(request: Request, full_path: str):
-    """Serve SPA frontend with no-cache headers for index.html."""
-    if full_path.startswith("api/"):
-        return {"detail": "Not Found"}
-
-    index_path = os.path.join(STATIC_DIR, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(
-            index_path,
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
-    return {"detail": "Dashboard not built"}
+# No SPA static files served by the backend anymore. 
+# The UI is exclusively hosted on GitHub Pages or external CDNs.
 

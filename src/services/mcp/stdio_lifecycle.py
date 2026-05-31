@@ -3,17 +3,48 @@ Stdio MCP Lifecycle - Server registration and lifecycle management.
 """
 import asyncio
 import logging
+import json
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.services.mcp.stdio_models import StdioMCPServer, ServerStatus
 from src.services.mcp.stdio_messages import MCPProtocolError
 from src.services.mcp.stdio_spawner import initialize_server
 from src.tools.stdio_adapter import stdio_adapter_registry
+from src.infrastructure.runtime.paths import workspace_root
 
 logger = logging.getLogger(__name__)
 
 
 class StdioMCPLifecycleMixin:
+    def _get_persistence_path(self: Any, tenant_id: str) -> Path:
+        """Get the persistence file path for a specific tenant."""
+        tenant_root = workspace_root() / f"tenant_{tenant_id}"
+        tenant_root.mkdir(parents=True, exist_ok=True)
+        return tenant_root / "stdio_servers.json"
+
+    def _save_tenant_servers(self: Any, tenant_id: str) -> None:
+        """Persist the registered servers for a tenant to a JSON file."""
+        servers = self._get_tenant_servers(tenant_id)
+        path = self._get_persistence_path(tenant_id)
+        
+        data = []
+        for name, server in servers.items():
+            data.append({
+                "name": server.name,
+                "command": server.command,
+                "args": server.args,
+                "working_dir": server.working_dir,
+                "description": server.description,
+                "tenant_id": server.tenant_id,
+            })
+            
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"[StdioMCP] Failed to persist servers for tenant {tenant_id}: {e}")
     async def register_server(
         self: Any,
         tenant_id: str,
@@ -47,6 +78,7 @@ class StdioMCPLifecycleMixin:
             raise
 
         self._start_health_check_loop()
+        self._save_tenant_servers(tenant_id)
         return server
 
     async def _start_server(self: Any, server: StdioMCPServer) -> None:
@@ -131,6 +163,7 @@ class StdioMCPLifecycleMixin:
         if not servers and tenant_id in self._tenant_servers:
             del self._tenant_servers[tenant_id]
 
+        self._save_tenant_servers(tenant_id)
         return True
 
     def _unregister_mcp_tools(self: Any, server: StdioMCPServer) -> None:
@@ -141,3 +174,37 @@ class StdioMCPLifecycleMixin:
         for tool in server.tools:
             adapter_name = f"mcp_{server.name}_{tool.name}"
             self._tool_name_to_server.pop(adapter_name, None)
+
+    async def restore_persisted_servers(self: Any) -> None:
+        """Restore all persisted servers across all tenants on boot."""
+        root = workspace_root()
+        for tenant_dir in root.glob("tenant_*"):
+            if not tenant_dir.is_dir():
+                continue
+                
+            tenant_id = tenant_dir.name.replace("tenant_", "")
+            path = tenant_dir / "stdio_servers.json"
+            
+            if not path.exists():
+                continue
+                
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    
+                for srv in data:
+                    try:
+                        # Register handles the start automatically
+                        await self.register_server(
+                            tenant_id=srv.get("tenant_id", tenant_id),
+                            name=srv["name"],
+                            command=srv["command"],
+                            args=srv["args"],
+                            working_dir=srv.get("working_dir"),
+                            description=srv.get("description", "")
+                        )
+                        logger.info(f"[StdioMCP] Successfully restored server '{srv['name']}'")
+                    except Exception as e:
+                        logger.error(f"[StdioMCP] Failed to restore server '{srv['name']}': {e}")
+            except Exception as e:
+                logger.error(f"[StdioMCP] Failed to load persistence file for {tenant_id}: {e}")

@@ -35,16 +35,45 @@ _pool_config = {
 _is_postgres = "postgresql" in DATABASE_URL.lower()
 engine_kwargs = {"echo": False}
 
+from sqlalchemy import event
+
 if _is_postgres:
     engine_kwargs.update(_pool_config)
     logger.info(f"[DB] Using PostgreSQL with pool_size=20, max_overflow=30")
 else:
-    logger.warning("[DB] Using SQLite - pool config not applicable")
-    engine_kwargs["connect_args"] = {"timeout": 30}
+    logger.warning("[DB] Using SQLite - using StaticPool for concurrency safety")
+    from sqlalchemy.pool import StaticPool
+    engine_kwargs["connect_args"] = {"timeout": 30, "check_same_thread": False}
+    engine_kwargs["poolclass"] = StaticPool
 
 engine = create_async_engine(DATABASE_URL, **engine_kwargs)
+
+if not _is_postgres:
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+from contextlib import asynccontextmanager
+
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
+
+@asynccontextmanager
+async def get_db_context():
+    """Async context manager for DB sessions, for use outside FastAPI dependencies."""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception as e:
+            logger.error(f"DB session error: {e}")
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:

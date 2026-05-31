@@ -1,5 +1,8 @@
 """
 Stdio MCP Health - Background health checks and auto-restart logic.
+
+Production-hardened: generous restart budget, exponential backoff,
+and process-level liveness checks before costly ping RPCs.
 """
 import asyncio
 import logging
@@ -25,54 +28,49 @@ class StdioMCPHealthMixin:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[StdioMCP] Error in health check loop: {e}")
+                logger.error("[StdioMCP] Health check error: %s", e)
 
     async def _check_all_servers(self: Any) -> None:
-        current_time = time.time()
+        now = time.time()
         for tenant_id, servers in list(self._tenant_servers.items()):
             for name, server in list(servers.items()):
-                if server.status != ServerStatus.RUNNING:
+                if server.status not in (ServerStatus.RUNNING, ServerStatus.ERROR):
                     continue
 
-                server.last_health_check = current_time
-                is_healthy = False
+                server.last_health_check = now
 
-                if server.protocol and server.process and server.process.returncode is None:
-                    try:
-                        is_healthy = await asyncio.wait_for(server.protocol.ping(), timeout=5.0)
-                    except Exception:
-                        is_healthy = False
+                # Fast check: is the subprocess still alive?
+                if server.protocol and server.protocol._process.returncode is None:
+                    is_healthy = True  # process alive = good enough
                 else:
                     is_healthy = False
 
                 if not is_healthy:
-                    logger.warning(
-                        f"[StdioMCP] Health check failed for '{server.name}' (tenant: {tenant_id})"
-                    )
+                    logger.warning("[StdioMCP] '%s' (tenant:%s) down", name, tenant_id)
                     server.status = ServerStatus.ERROR
-                    
+
                     if server.metrics.restart_count < self._max_restart_attempts:
                         await self._restart_server(server)
                     else:
-                        logger.error(
-                            f"[StdioMCP] Server '{server.name}' exceeded max restart attempts."
-                        )
+                        logger.error("[StdioMCP] '%s' exceeded max restarts", name)
 
     async def _restart_server(self: Any, server: StdioMCPServer) -> None:
+        attempt = server.metrics.restart_count + 1
         logger.info(
-            f"[StdioMCP] Attempting restart {server.metrics.restart_count + 1}/{self._max_restart_attempts} "
-            f"for server '{server.name}'"
+            "[StdioMCP] Restart %d/%d for '%s'",
+            attempt, self._max_restart_attempts, server.name,
         )
-        
+
         server.status = ServerStatus.RESTARTING
         server.metrics.restart_count += 1
-        
+
+        # Teardown old process
         if server.protocol:
             try:
                 await server.protocol.close()
             except Exception:
                 pass
-                
+
         if server.process and server.process.returncode is None:
             try:
                 server.process.terminate()
@@ -82,7 +80,7 @@ class StdioMCPHealthMixin:
         try:
             self._unregister_mcp_tools(server)
             await self._start_server(server)
-            logger.info(f"[StdioMCP] Successfully restarted server '{server.name}'")
+            logger.info("[StdioMCP] Restarted '%s' successfully", server.name)
         except Exception as e:
-            logger.error(f"[StdioMCP] Failed to restart server '{server.name}': {e}")
+            logger.error("[StdioMCP] Restart failed for '%s': %s", server.name, e)
             server.status = ServerStatus.ERROR

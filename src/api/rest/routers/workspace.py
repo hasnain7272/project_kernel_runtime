@@ -140,3 +140,67 @@ async def list_workspace_files(
         return items
 
     return {"files": _scan(workspace)}
+
+
+@router.get("/artifacts")
+async def get_artifact(
+    path: str,
+    user: TokenPayload = Depends(get_current_user_dep),
+):
+    """Serve a tool-generated artifact (e.g. screenshot) from the temp directory."""
+    import tempfile
+    from fastapi.responses import FileResponse
+    
+    # Security: only allow reading from system temp root
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    requested = Path(path).resolve()
+    
+    try:
+        requested.relative_to(temp_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied: Artifact outside temp root")
+        
+    if not requested.exists() or not requested.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+        
+    # Only allow images for now
+    if requested.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        raise HTTPException(status_code=403, detail="Access denied: Only image artifacts are permitted")
+        
+    return FileResponse(requested)
+
+
+@router.get("/sessions/{session_id}/file/{path:path}")
+async def get_workspace_file(
+    session_id: str,
+    path: str,
+    db: AsyncSession = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user_dep),
+):
+    """Serve a file from the session's isolated workspace."""
+    # Verify session belongs to tenant
+    session_result = await db.execute(
+        select(SessionModel.id).where(
+            and_(
+                SessionModel.id == session_id,
+                SessionModel.tenant_id == user.tenant_id,
+            )
+        )
+    )
+    if not session_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    workspace = get_session_workspace(user.tenant_id, session_id)
+    requested = (workspace / path).resolve()
+    
+    # Security: prevent traversal
+    try:
+        requested.relative_to(workspace)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    if not requested.exists() or not requested.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    from fastapi.responses import FileResponse
+    return FileResponse(requested)

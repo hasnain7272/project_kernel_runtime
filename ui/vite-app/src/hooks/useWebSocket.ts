@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getAuthToken } from '@/api/client';
+import { getAuthToken, WS_BASE_URL } from '@/api/client';
 
 interface WebSocketMessage {
   data: unknown;
@@ -41,11 +41,9 @@ export function useWebSocket(path: string, options: UseWebSocketOptions = {}) {
   const queueRef = useRef<unknown[]>([]);
 
   const url = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = import.meta.env.VITE_API_URL || window.location.host;
     const token = getAuthToken();
     const suffix = token && !path.includes('token=') ? `${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : '';
-    return `${protocol}//${host}${path}${suffix}`;
+    return `${WS_BASE_URL}${path}${suffix}`;
   }, [path]);
 
   const clearTimer = () => {

@@ -157,6 +157,9 @@ async def build_llm_context(
             except:
                 pass
                 
+        if row.extra_metadata:
+            entry["metadata"] = row.extra_metadata
+            
         messages.append(entry)
 
     return messages
@@ -170,21 +173,21 @@ async def persist_message(
     task_id: str | None = None,
     tool_call_id: str | None = None,
     tool_calls: list | None = None,
+    metadata: dict | None = None,
 ) -> MessageModel:
     """Write a single conversation turn to the database."""
-    tenant_id = "local"
-    try:
-        from src.infrastructure.db.models.session_model import SessionModel
-        result = await db.execute(
-            select(SessionModel)
-            .where(SessionModel.id == session_id)
-            .with_for_update()
-        )
-        session = result.scalar_one_or_none()
-        if session:
-            tenant_id = session.tenant_id
-    except Exception as e:
-        logger.debug(f"Row lock not acquired: {e}")
+    from src.infrastructure.db.models.session_model import SessionModel
+    from src.infrastructure.db.session import _is_postgres
+
+    # Row-level locking for sequence safety — only on PostgreSQL.
+    # SQLite serializes writes at the engine level; with_for_update()
+    # would escalate to an exclusive DB lock and cause "database is locked".
+    stmt = select(SessionModel).where(SessionModel.id == session_id)
+    if _is_postgres:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
+    session = result.scalar_one_or_none()
+    tenant_id = session.tenant_id if session else "local"
 
     max_stmt = select(func.coalesce(func.max(MessageModel.sequence), -1)).where(MessageModel.session_id == session_id)
     if tenant_id:
@@ -200,8 +203,10 @@ async def persist_message(
         content=content,
         tool_call_id=tool_call_id,
         tool_calls=json.dumps(tool_calls) if tool_calls else None,
+        extra_metadata=metadata or {},
         sequence=next_seq,
     )
     db.add(msg)
     await db.flush()
     return msg
+

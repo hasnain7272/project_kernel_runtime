@@ -31,9 +31,11 @@ class UpdateAgentMemoryTool(BaseTool):
 
         try:
             async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(SessionModel).where(SessionModel.id == session_id).with_for_update()
-                )
+                from src.infrastructure.db.session import _is_postgres
+                stmt = select(SessionModel).where(SessionModel.id == session_id)
+                if _is_postgres:
+                    stmt = stmt.with_for_update()
+                result = await db.execute(stmt)
                 session = result.scalar_one_or_none()
                 if not session:
                     return "Error: Session not found in DB."

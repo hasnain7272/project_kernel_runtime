@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from src.domain.exceptions import ToolExecutionError
 from src.infrastructure.runtime.config import SANDBOX_MODE, KUBERNETES_MODE, ALLOW_ANON_LOCAL
-from src.infrastructure.sandbox.docker_adapter import SandboxAdapter
+from src.infrastructure.sandbox.docker import SandboxAdapter
 from src.infrastructure.sandbox.kubernetes import get_sandbox_executor
 from src.tools.core.base import BaseTool
 
@@ -49,10 +49,24 @@ class ToolExecutionRouter:
                 tool_, session_id, tenant_id, kwargs, folder_slug
             )
 
+        from src.services.tool_execution.multiplexer import resource_multiplexer
+
         if folder_slug and "working_dir" not in kwargs:
             kwargs["working_dir"] = folder_slug
              
-        return await tool_.execute(session_id=session_id, **kwargs)
+        # Identify if this is a stateful resource (like an MCP server)
+        # MCP tools are named 'mcp_<serverName>_<toolName>'
+        is_mcp = tool_.name.startswith("mcp_")
+        resource_name = tool_.name.split("_")[1] if is_mcp else None
+
+        if is_mcp and resource_name:
+            await resource_multiplexer.acquire(resource_name)
+            try:
+                return await tool_.execute(session_id=session_id, **kwargs)
+            finally:
+                resource_multiplexer.release(resource_name)
+        else:
+            return await tool_.execute(session_id=session_id, **kwargs)
 
     async def _execute_sandboxed(
         self, tool_: BaseTool, session_id: str, tenant_id: str,

@@ -16,7 +16,7 @@ def get_cors_config() -> Tuple[List[str], List[str], List[str], bool]:
     if is_prod:
         origins = os.environ.get(
             "ALLOWED_ORIGINS",
-            "https://app.antigravity.dev,https://api.antigravity.dev"
+            "https://app.antigravity.dev,https://api.antigravity.dev,https://*.github.io,https://*.trycloudflare.com"
         ).split(",")
         methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
         headers = ["Authorization", "Content-Type", "X-Tenant-Id", "X-Request-ID"]

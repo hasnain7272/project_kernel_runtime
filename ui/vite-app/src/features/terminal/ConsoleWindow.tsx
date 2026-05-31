@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { useSessionStore } from '@/store/sessionStore';
 import { useTaskStore } from '@/store/taskStore';
-import { getAuthToken } from '@/api/client';
+import { getAuthToken, WS_BASE_URL } from '@/api/client';
 
 export function ConsoleWindow() {
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -62,7 +62,7 @@ export function ConsoleWindow() {
     const params = new URLSearchParams({ tenant_id: tenantId || 'local' });
     const token = getAuthToken();
     if (token) params.set('token', token);
-    const wsUrl = `${protocol}://${window.location.host}/api/v1/tasks/${activeTaskId}/stream?${params.toString()}`;
+    const wsUrl = `${WS_BASE_URL}/api/v1/tasks/${activeTaskId}/stream?${params.toString()}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {

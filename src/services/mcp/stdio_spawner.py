@@ -20,6 +20,10 @@ async def spawn_mcp_server(
         import os
         spawn_env["PATH"] = os.environ.get("PATH", "")
 
+    import sys
+    if command == "python" or command == "python3":
+        command = sys.executable
+
     process = await asyncio.create_subprocess_exec(
         command,
         *args,

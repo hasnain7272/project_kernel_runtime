@@ -10,7 +10,7 @@ Backward compatibility: Legacy functions for old router code.
 import os
 from typing import AsyncGenerator, Optional
 
-from fastapi import Header, HTTPException, Depends, status
+from fastapi import Header, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,10 +38,17 @@ async def get_broker_dep():
 
 
 async def get_current_user_dep(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> TokenPayload:
-    """Get current user from JWT token."""
-    if not credentials:
+    """Get current user from JWT token (header or query param)."""
+    token = None
+    if credentials:
+        token = credentials.credentials
+    elif request and "token" in request.query_params:
+        token = request.query_params["token"]
+
+    if not token:
         if ALLOW_ANON_LOCAL:
             return TokenPayload(
                 tenant_id="local",
@@ -59,7 +66,7 @@ async def get_current_user_dep(
             detail="Authentication required",
         )
     
-    return decode_token(credentials.credentials)
+    return decode_token(token)
 
 
 async def get_tenant_id(

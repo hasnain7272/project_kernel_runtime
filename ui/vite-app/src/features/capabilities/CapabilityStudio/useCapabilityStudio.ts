@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiClient } from '@/api/client';
+import { useServerEventStream } from '@/store/useServerEventStream';
 import type { CatalogResponse, DashboardResponse } from './types';
 
 export function useCapabilityStudio() {
@@ -7,6 +8,8 @@ export function useCapabilityStudio() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  
+  const { lastEvent } = useServerEventStream();
 
   const loadCatalog = useCallback(async () => {
     setLoading(true);
@@ -30,6 +33,16 @@ export function useCapabilityStudio() {
     await loadCatalog();
     if (includeDashboard) await loadDashboard();
   }, [loadCatalog, loadDashboard]);
+
+  // Dynamic SSE Integration
+  useEffect(() => {
+    if (!lastEvent) return;
+    if (lastEvent.type === 'CATALOG_UPDATED') {
+      loadCatalog();
+    } else if (lastEvent.type === 'DASHBOARD_UPDATED') {
+      loadDashboard();
+    }
+  }, [lastEvent, loadCatalog, loadDashboard]);
 
   const counts = useMemo(() => catalog?.summary || {
     tools: catalog?.tools.length || 0,

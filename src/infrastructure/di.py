@@ -5,7 +5,7 @@ Instead of a full DI container that nobody uses, this provides
 typed factory functions that are actually called by the codebase.
 Easy to mock in tests via monkeypatch.
 """
-from src.infrastructure.sandbox.docker_adapter import SandboxAdapter
+from src.infrastructure.sandbox.docker import SandboxAdapter
 from src.services.tool_execution.router import ToolExecutionRouter
 
 

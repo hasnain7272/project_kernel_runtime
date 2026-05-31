@@ -7,7 +7,7 @@ Chat Router — Multi-tenant messaging to BrainWorker.
 """
 from typing import Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +30,9 @@ router = APIRouter(prefix="/api/v1/chat", tags=["Chat"])
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    files: list[dict] = []
     shadow_mode: bool = False
+    active_model_id: str | None = None
 
 
 @router.post("/", status_code=status.HTTP_202_ACCEPTED)
@@ -57,9 +59,11 @@ async def send_chat_message(
     if not session:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized or session not found")
         
-    # Update shadow mode in session context
+    # Update shadow mode and active model ID in session context
     context = dict(session.context) if session.context else {}
     context["shadow_mode"] = req.shadow_mode
+    if req.active_model_id:
+        context["active_model_id"] = req.active_model_id
     session.context = context
     db.add(session)
     
@@ -124,10 +128,90 @@ async def get_chat_history(
         "session_id": session_id,
         "messages": [
             {
+                "id": str(r.id),
                 "role": r.role,
                 "content": r.content,
+                "tool_calls": _parse_tool_calls(r.tool_calls),
+                "tool_call_id": r.tool_call_id,
+                "metadata": _parse_json_field(r.extra_metadata),
                 "created_at": r.created_at.isoformat(),
             }
             for r in rows
         ],
     }
+
+
+def _parse_json_field(raw):
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        import json
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+class ApprovalRequest(BaseModel):
+    message_id: str
+    decision: str  # "approved" or "denied"
+
+
+@router.post("/{session_id}/approve")
+async def approve_tool_call(
+    session_id: str,
+    req: ApprovalRequest,
+    db: AsyncSession = Depends(get_db),
+    broker=Depends(get_broker_dep),
+    user: TokenPayload = Depends(get_current_user_dep),
+) -> Dict[str, Any]:
+    """Handles human-in-the-loop approval for restricted tools."""
+    # 1. Fetch the message to get tool details from metadata
+    msg_result = await db.execute(
+        select(MessageModel).where(
+            MessageModel.id == req.message_id,
+            MessageModel.session_id == session_id,
+            MessageModel.tenant_id == user.tenant_id
+        )
+    )
+    message = msg_result.scalar_one_or_none()
+    if not message or not message.extra_metadata or message.extra_metadata.get("status") != "NEEDS_APPROVAL":
+        raise HTTPException(404, "Pending approval request not found")
+
+    if req.decision == "denied":
+        message.extra_metadata = {**message.extra_metadata, "status": "DENIED"}
+        db.add(message)
+        await db.commit()
+        return {"status": "denied"}
+
+    # 2. Mark as approved and re-dispatch
+    tool_name = message.extra_metadata.get("tool_name")
+    tool_args = message.extra_metadata.get("args", {})
+    tool_args["__approved__"] = True # Injection flag for PolicyEngine
+    
+    message.extra_metadata = {**message.extra_metadata, "status": "APPROVED"}
+    db.add(message)
+    await db.commit()
+
+    await broker.publish(
+        "execution_queue",
+        {
+            "event_type": "EXECUTE_TOOL",
+            "task_id": message.task_id,
+            "session_id": session_id,
+            "tool": {
+                "name": tool_name,
+                "args": tool_args,
+                "id": message.tool_call_id
+            }
+        },
+        tenant_id=user.tenant_id
+    )
+
+    return {"status": "dispatched"}
+
+
+
+def _parse_tool_calls(raw):
+    return _parse_json_field(raw)

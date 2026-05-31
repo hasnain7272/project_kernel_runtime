@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { apiClient } from '@/api/client';
 import { useSessionStore } from '@/store/sessionStore';
 import { useTaskStore } from '@/store/taskStore';
@@ -23,6 +23,7 @@ export function CommandPalette() {
   const ensureSession = useSessionStore((s) => s.ensureSession);
   const upsertTask = useTaskStore((s) => s.upsertTask);
   const setActiveTask = useTaskStore((s) => s.setActiveTask);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -80,6 +81,7 @@ export function CommandPalette() {
         <form onSubmit={handleSubmit} className="flex items-center border-b border-slate-800 px-4">
           <TerminalSquare className="mr-3 h-5 w-5 text-slate-500" />
           <input
+            ref={inputRef}
             autoFocus
             type="text"
             className="flex h-14 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-slate-500"
@@ -116,6 +118,24 @@ export function CommandPalette() {
             </div>
           </div>
         )}
+
+        <div className="border-b border-slate-800/60">
+          <div className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
+            Quick Actions
+          </div>
+          <div className="pb-2">
+            <button className="flex w-full items-center gap-3 px-4 py-2 text-left transition hover:bg-slate-800/60" onClick={(e) => { e.preventDefault(); setQuery('/search '); inputRef.current?.focus(); }}>
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-cyan-900/40 text-cyan-400">?</span>
+              <span className="flex-1 text-sm text-slate-300">Global Search</span>
+              <span className="text-xs text-slate-600">Type /search</span>
+            </button>
+            <button className="flex w-full items-center gap-3 px-4 py-2 text-left transition hover:bg-slate-800/60" onClick={(e) => { e.preventDefault(); setQuery('/tools '); inputRef.current?.focus(); }}>
+              <Zap className="h-4 w-4 text-emerald-400" />
+              <span className="flex-1 text-sm text-slate-300">Tool Registry</span>
+              <span className="text-xs text-slate-600">Type /tools</span>
+            </button>
+          </div>
+        </div>
 
         <div className="flex items-center justify-between px-4 py-2.5 text-xs text-slate-600">
           <div className="flex gap-3">

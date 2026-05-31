@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Server, Plug, Terminal, ChevronDown, ChevronRight, Play, X, AlertCircle, Plus, RefreshCw } from 'lucide-react';
 import { apiClient } from '@/api/client';
+import { useServerEventStream } from '@/store/useServerEventStream';
 
 export function CapabilitySidebarPanel({ onOpenStudio }: { onOpenStudio: () => void }) {
   const [stdioServers, setStdioServers] = useState<any[]>([]);
@@ -8,6 +9,7 @@ export function CapabilitySidebarPanel({ onOpenStudio }: { onOpenStudio: () => v
   const [expanded, setExpanded] = useState<string | null>(null);
   const [tools, setTools] = useState<Record<string, any[]>>({});
   const [loading, setLoading] = useState(false);
+  const { lastEvent } = useServerEventStream();
 
   const reload = async () => {
     setLoading(true);
@@ -21,6 +23,12 @@ export function CapabilitySidebarPanel({ onOpenStudio }: { onOpenStudio: () => v
   };
 
   useEffect(() => { reload(); }, []);
+  useEffect(() => {
+    if (!lastEvent) return;
+    if (['CATALOG_UPDATED', 'DASHBOARD_UPDATED', 'STDIO_UPDATED', 'STDIO_SERVERS_UPDATED', 'PLUGINS_UPDATED'].includes(lastEvent.type)) {
+      reload();
+    }
+  }, [lastEvent]);
 
   const toggleServer = async (name: string) => {
     if (expanded === name) { setExpanded(null); return; }
@@ -48,9 +56,15 @@ export function CapabilitySidebarPanel({ onOpenStudio }: { onOpenStudio: () => v
               <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
             </button>
           </div>
-          {stdioServers.length === 0 && (
+          {loading ? (
+            <div className="space-y-1.5 mb-2">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="h-9 rounded-lg bg-slate-800/60 animate-pulse border border-slate-800" />
+              ))}
+            </div>
+          ) : stdioServers.length === 0 ? (
             <div className="text-[10px] text-slate-600 px-1 py-2 italic">No stdio servers yet.</div>
-          )}
+          ) : null}
           {stdioServers.map(s => (
             <div key={s.name} className="mb-1.5 rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
               <button onClick={() => toggleServer(s.name)}
@@ -79,15 +93,22 @@ export function CapabilitySidebarPanel({ onOpenStudio }: { onOpenStudio: () => v
             <Plug className="h-3.5 w-3.5 text-emerald-400" />
             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">HTTP Plugins</span>
           </div>
-          {plugins.length === 0 && (
-            <div className="text-[10px] text-slate-600 px-1 py-2 italic">No plugins registered.</div>
-          )}
-          {plugins.map((p: any) => (
-            <div key={p.name} className="flex items-center gap-2 px-2.5 py-2 mb-1 rounded-lg border border-slate-800 bg-slate-900/40">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span className="text-[11px] font-semibold text-slate-200 truncate">{p.name}</span>
+          {loading ? (
+            <div className="space-y-1.5">
+              {[...Array(2)].map((_, i) => (
+                <div key={i} className="h-8 rounded-lg bg-slate-800/60 animate-pulse border border-slate-800" />
+              ))}
             </div>
-          ))}
+          ) : plugins.length === 0 ? (
+            <div className="text-[10px] text-slate-600 px-1 py-2 italic">No plugins registered.</div>
+          ) : (
+            plugins.map((p: any) => (
+              <div key={p.name} className="flex items-center gap-2 px-2.5 py-2 mb-1 rounded-lg border border-slate-800 bg-slate-900/40">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                <span className="text-[11px] font-semibold text-slate-200 truncate">{p.name}</span>
+              </div>
+            ))
+          )}
         </div>
       </div>
 

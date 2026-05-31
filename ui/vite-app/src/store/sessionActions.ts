@@ -3,11 +3,12 @@ import { apiClient } from '@/api/client';
 import type { SessionState, Workspace } from './sessionTypes';
 
 export const createSessionActions: StateCreator<SessionState, [], [], Pick<SessionState,
-  'setSessionId' | 'setUser' | 'setStatus' | 'setWorkspaces' | 'addPlugin' | 'removePlugin' |
+  'setSessionId' | 'setActiveModelId' | 'setUser' | 'setStatus' | 'setWorkspaces' | 'addPlugin' | 'removePlugin' |
   'toggleSkill' | 'setLlmConfig' | 'setLlmPreset' | 'initLlmFromStorage' | 'ensureSession' |
   'addWorkspace' | 'removeWorkspace' | 'reset'
 >> = (set, get) => ({
   setSessionId: (id) => set({ sessionId: id, status: 'active' }),
+  setActiveModelId: (id) => set({ activeModelId: id }),
   setUser: (email, role) => set({ userEmail: email, userRole: role || 'developer' }),
   setStatus: (status) => set({ status }),
   setWorkspaces: (workspaces) => set({ workspaces }),
@@ -18,17 +19,26 @@ export const createSessionActions: StateCreator<SessionState, [], [], Pick<Sessi
   setLlmPreset: (preset) => set({ llmPreset: preset }),
   initLlmFromStorage: () => {
     try {
-      const parsed = JSON.parse(localStorage.getItem('llm_config') || '{}');
-      if (parsed.config) set({ llmConfig: parsed.config, llmPreset: parsed.preset });
+      const raw = localStorage.getItem('llm_config');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      const current = get().llmConfig;
+      if (!current.model && parsed.config?.model) {
+        set({ llmConfig: { ...current, ...parsed.config, api_key: '' }, llmPreset: parsed.preset });
+      }
     } catch {}
   },
   ensureSession: async (workspaces?: Workspace[]) => {
     if (!localStorage.getItem('auth_token')) return;
     const current = get();
-    if (current.status === 'active' && current.sessionId) {
+
+    // If we already have a session ID from persistence, just verify it's active.
+    if (current.sessionId) {
       if (!current.tenantId) set({ tenantId: 'local' });
+      set({ status: 'active' });
       return;
     }
+
     set({ status: 'connecting' });
     try {
       const res = await apiClient.post<{ id: string; tenant_id: string; workspaces: Workspace[] }>('/sessions/', {
@@ -37,7 +47,12 @@ export const createSessionActions: StateCreator<SessionState, [], [], Pick<Sessi
         workspaces: workspaces || current.workspaces || [],
       });
       if (!res.data?.id) return set({ status: 'error' });
-      set({ sessionId: res.data.id, tenantId: res.data.tenant_id || '', workspaces: res.data.workspaces || [], status: 'active' });
+      set({
+        sessionId: res.data.id,
+        tenantId: res.data.tenant_id || 'local',
+        workspaces: res.data.workspaces || [],
+        status: 'active'
+      });
     } catch {
       set({ status: 'error' });
     }
@@ -54,5 +69,5 @@ export const createSessionActions: StateCreator<SessionState, [], [], Pick<Sessi
     const res = await apiClient.delete<{ workspaces: Workspace[] }>(`/sessions/${sessionId}/workspaces/${slug}`);
     if (res.data?.workspaces) set({ workspaces: res.data.workspaces });
   },
-  reset: () => set({ sessionId: '', tenantId: '', userEmail: '', userRole: 'developer', workspaces: [], plugins: [], activeSkills: [], status: 'idle' }),
+  reset: () => set({ sessionId: '', tenantId: '', userEmail: '', userRole: 'developer', workspaces: [], plugins: [], activeSkills: [], status: 'idle', llmConfig: { ...get().llmConfig, api_key: '' } }),
 });

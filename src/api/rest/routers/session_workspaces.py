@@ -9,6 +9,8 @@ from src.api.rest.dependencies import get_current_user_dep, get_db
 from src.api.rest.routers.session_models import WorkspaceAddRequest
 from src.api.rest.routers.session_utils import get_or_create_workspace, get_session_or_404, prepare_workspaces, session_to_dict, workspace_to_dict
 from src.infrastructure.auth.jwt_auth import TokenPayload
+from src.infrastructure.security.crypto import encrypt_string
+from src.infrastructure.storage.gvfs import get_gvfs
 
 router = APIRouter()
 
@@ -26,6 +28,19 @@ async def add_workspace(
     current = list(session.workspaces or [])
     if workspace.slug not in {ws.slug for ws in current}:
         session.workspaces = [*current, workspace]
+
+    if data["type"] == "git" and data.get("url"):
+        github_token = (session.context or {}).get("github", {}).get("access_token")
+        if github_token and not github_token.startswith("gAAAA"):
+            github_token = encrypt_string(github_token)
+        gvfs = await get_gvfs()
+        await gvfs.mount_repository(
+            session_id=session_id,
+            repo_url=data["url"],
+            branch=data.get("branch") or "main",
+            auth_token=github_token,
+        )
+
     session.last_active_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(session)

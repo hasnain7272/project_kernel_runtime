@@ -3,7 +3,8 @@
  * Single source of truth for GitHub connection in workspace
  */
 import { useState, useEffect } from 'react';
-import { apiClient } from '@/api/client';
+import { useSessionStore } from '@/store/sessionStore';
+import { apiClient, API_BASE_URL } from '@/api/client';
 
 interface GitHubUser {
   login: string;
@@ -28,6 +29,21 @@ export function GitHubConnectButton({
   const [isLoading, setIsLoading] = useState(false);
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const activeSessionId = useSessionStore((s) => s.sessionId);
+  const resolvedSessionId = sessionId || activeSessionId;
+
+  useEffect(() => {
+    if (!resolvedSessionId) return;
+    apiClient.get<{ connected: boolean; user?: GitHubUser }>(`/github/status?session_id=${resolvedSessionId}`).then((res) => {
+      if (res.data?.connected && res.data.user) {
+        setUser(res.data.user);
+        setStatus('connected');
+      } else {
+        setUser(null);
+        setStatus('disconnected');
+      }
+    });
+  }, [resolvedSessionId]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -48,7 +64,7 @@ export function GitHubConnectButton({
   }, [onConnect]);
 
   const handleConnect = () => {
-    if (!sessionId) {
+    if (!resolvedSessionId) {
       console.warn('[GitHub] No sessionId provided');
       return;
     }
@@ -59,31 +75,29 @@ export function GitHubConnectButton({
     const width = 500;
     const height = 600;
     const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-
+    const origin = window.location.origin + window.location.pathname;
+    const redirect_uri = encodeURIComponent(origin.replace(/\/$/, '') + '/#/github/callback');
     const popup = window.open(
-      `/api/v1/github/auth?session_id=${sessionId}&redirect_uri=${encodeURIComponent(window.location.origin + '/github/callback')}`,
+      `${API_BASE_URL}/api/v1/github/auth?session_id=${resolvedSessionId}&redirect_uri=${redirect_uri}`,
       'github-oauth',
-      `width=${width},height=${height},left=${left},top=${top},popup`
+      `width=${width},height=${height},left=${left},top=80,popup`
     );
 
     // Cleanup if popup closed manually
     const checkClosed = setInterval(() => {
       if (popup?.closed) {
         clearInterval(checkClosed);
-        if (status === 'connecting') {
-          setIsLoading(false);
-          setStatus('disconnected');
-        }
+        setIsLoading(false);
+        setStatus((current) => current === 'connecting' ? 'disconnected' : current);
       }
     }, 1000);
   };
 
   const handleDisconnect = async () => {
-    if (!sessionId) return;
+    if (!resolvedSessionId) return;
 
     try {
-      const res = await apiClient.delete(`/api/v1/github/disconnect?session_id=${sessionId}`);
+      const res = await apiClient.delete(`/github/disconnect?session_id=${resolvedSessionId}`);
       if (res.data || res.status === 'success') {
         setUser(null);
         setStatus('disconnected');
@@ -132,19 +146,19 @@ export function GitHubConnectButton({
   return (
     <button
       onClick={handleConnect}
-      disabled={isLoading || !sessionId}
+      disabled={isLoading || !resolvedSessionId}
       className={`
         flex items-center gap-2 rounded-lg border transition-all duration-200
         ${compact
           ? 'px-2 py-1 text-xs'
           : 'px-4 py-2 text-sm'
         }
-        ${isLoading || !sessionId
+        ${isLoading || !resolvedSessionId
           ? 'bg-slate-800/40 text-slate-600 border-slate-800 cursor-not-allowed'
           : 'bg-slate-800/60 hover:bg-slate-700 text-slate-200 border-slate-700/50 hover:border-slate-600'
         }
       `}
-      title={sessionId ? 'Connect GitHub account' : 'No active session'}
+      title={resolvedSessionId ? 'Connect GitHub account' : 'No active session'}
     >
       {isLoading ? (
         <>

@@ -10,6 +10,7 @@ from src.api.rest.dependencies import get_db, get_current_user_dep
 from src.infrastructure.auth.github_oauth import get_github_client
 from src.infrastructure.auth.jwt_auth import TokenPayload
 from src.infrastructure.db.models.session_model import SessionModel
+from src.infrastructure.security.crypto import decrypt_string, encrypt_string
 from src.api.rest.routers.git_mount import create_signed_state, parse_signed_state
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ async def connect(
             "name": github_user.name,
             "email": github_user.email,
             "avatar_url": github_user.avatar_url,
-            "access_token": github_user.access_token,
+            "access_token": encrypt_string(github_user.access_token),
         }
         session.context = ctx
         await db.commit()
@@ -130,7 +131,7 @@ async def list_repos(
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    repos = await client.list_repos(token, page)
+    repos = await client.list_repos(_resolve_token(token), page)
     
     return {
         "repos": [{"id": r["id"], "name": r["name"], "full_name": r["full_name"],
@@ -163,3 +164,43 @@ async def disconnect(
         await db.commit()
     
     return {"success": True, "message": "Disconnected"}
+
+
+@router.get("/status")
+async def status(
+    session_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user_dep),
+):
+    """Return GitHub connection state without exposing credentials."""
+    result = await db.execute(
+        select(SessionModel).where(
+            and_(
+                SessionModel.id == session_id,
+                SessionModel.tenant_id == user.tenant_id,
+            )
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    github = (session.context or {}).get("github") or {}
+    token = github.get("access_token")
+    return {
+        "connected": bool(token),
+        "user": {
+            "id": github.get("user_id"),
+            "login": github.get("login"),
+            "name": github.get("name"),
+            "avatar_url": github.get("avatar_url"),
+        } if token else None,
+    }
+
+
+def _resolve_token(token: str) -> str:
+    if not token:
+        return ""
+    if token.startswith("gAAAA"):
+        return decrypt_string(token)
+    return token

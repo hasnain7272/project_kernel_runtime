@@ -4,11 +4,12 @@
  * Handles the OAuth redirect and communicates with parent window.
  */
 import { useEffect } from 'react';
-import { getAuthToken } from '@/api/client';
+import { getAuthToken, API_BASE_URL } from '@/api/client';
 
 export default function GitHubCallback() {
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const search = window.location.search || (window.location.hash.includes('?') ? '?' + window.location.hash.split('?')[1] : '');
+    const params = new URLSearchParams(search);
     const code = params.get('code');
     const state = params.get('state');
     const error = params.get('error');
@@ -20,9 +21,10 @@ export default function GitHubCallback() {
     }
 
     if (code && state) {
-      const redirectUri = `${window.location.origin}/github/callback`;
+      const origin = window.location.origin + window.location.pathname;
+      const redirectUri = origin.replace(/\/$/, '') + '/#/github/callback';
       const query = new URLSearchParams({ code, state, redirect_uri: redirectUri });
-      fetch(`/api/v1/github/connect?${query.toString()}`, {
+      fetch(`${API_BASE_URL}/api/v1/github/connect?${query.toString()}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAuthToken()}` },
       })

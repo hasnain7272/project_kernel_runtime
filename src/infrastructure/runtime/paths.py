@@ -46,8 +46,22 @@ def resolve_workspace_path(
         candidate = Path(path_str)
         
     if candidate.is_absolute():
-        # Security: Absolute paths must still be within the root
+        # Allow system temp directory for tool-generated artifacts (read-only in PolicyEngine)
+        import tempfile
+        temp_root = Path(tempfile.gettempdir()).resolve()
         resolved = candidate.resolve()
+        try:
+            resolved.relative_to(temp_root)
+            return resolved # It's in temp, allow resolution
+        except ValueError:
+            pass # Not in temp
+            
+        # Security: Absolute paths must still be within the root
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            raise GovernanceDeniedError(f"Path escapes session root: {resolved}")
     else:
         resolved = (root / candidate).resolve()
 

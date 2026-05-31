@@ -17,6 +17,8 @@ def include_routers(app: FastAPI):
     app.include_router(git_mount.router)
     app.include_router(github_auth.router)
     app.include_router(auth_module.router)
+    import src.api.rest.routers.state_stream as state_stream_module
+    app.include_router(state_stream_module.router)
     import src.api.rest.routers.workspace as workspace_module
     app.include_router(workspace_module.router)
     import src.api.rest.routers.mcp_plugins as mcp_plugins_module
@@ -27,3 +29,5 @@ def include_routers(app: FastAPI):
     app.include_router(mcp_stdio_module.router)
     import src.api.rest.routers.mcp_stdio_info as mcp_stdio_info_module
     app.include_router(mcp_stdio_info_module.router)
+    import src.api.rest.routers.settings as settings_module
+    app.include_router(settings_module.router)

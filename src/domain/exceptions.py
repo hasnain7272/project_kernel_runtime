@@ -12,6 +12,10 @@ class GovernanceDeniedError(BaseDomainError):
     """Raised when a tool action is explicitly denied by RBAC policy."""
     pass
 
+class GovernanceApprovalRequiredError(BaseDomainError):
+    """Raised when a tool action requires human-in-the-loop approval."""
+    pass
+
 class SandboxExecutionError(BaseDomainError):
     """Raised when sandbox execution crashes or times out."""
     pass

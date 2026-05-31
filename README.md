@@ -44,16 +44,20 @@ pip install -e .
 
 ## Run
 
+**Standard Mode:**
 ```bash
-python main.py
 python main.py --host 0.0.0.0 --port 8089
+```
+
+**Cloudflare Tunnel Mode (for GitHub Pages Frontend):**
+```powershell
+.\start_with_tunnel.ps1
 ```
 
 ## Key Endpoints
 
 - `GET /health`
 - `GET /status/full`
-- `GET /api/ui/bootstrap`
 - `POST /api/chat/execute`
 - `GET /api/chat/tasks`
 - `GET /api/sessions`

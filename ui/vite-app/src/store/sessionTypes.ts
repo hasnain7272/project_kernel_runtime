@@ -11,6 +11,9 @@ export interface LLMConfig {
   api_key: string;
   base_url: string;
   extra_body: string;
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
 }
 
 export interface SessionState {
@@ -24,7 +27,9 @@ export interface SessionState {
   status: 'idle' | 'connecting' | 'active' | 'error';
   llmConfig: LLMConfig;
   llmPreset: string;
+  activeModelId: string;
   setSessionId: (id: string) => void;
+  setActiveModelId: (id: string) => void;
   setUser: (email: string, role?: string) => void;
   setStatus: (s: SessionState['status']) => void;
   setWorkspaces: (w: Workspace[]) => void;

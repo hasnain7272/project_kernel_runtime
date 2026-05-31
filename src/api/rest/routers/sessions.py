@@ -13,6 +13,8 @@ from src.api.rest.routers.session_utils import get_or_create_workspace, get_sess
 from src.api.rest.routers.session_workspaces import router as workspaces_router
 from src.infrastructure.auth.jwt_auth import TokenPayload
 from src.infrastructure.db.models.session_model import SessionModel
+from src.infrastructure.db.models.message_model import MessageModel
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
@@ -73,6 +75,69 @@ async def end_session(session_id: str, db: AsyncSession = Depends(get_db), user:
     session.is_active = False
     await db.commit()
     return {"status": "ended", "session_id": session_id}
+
+
+class ForkRequest(BaseModel):
+    message_id: str
+
+@router.post("/{session_id}/fork", status_code=status.HTTP_201_CREATED)
+async def fork_session(
+    session_id: str,
+    req: ForkRequest,
+    db: AsyncSession = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user_dep),
+) -> Dict[str, Any]:
+    old_session = await get_session_or_404(db, session_id, user.tenant_id)
+    
+    # Create new session
+    new_session = SessionModel(
+        tenant_id=user.tenant_id,
+        organization_id=user.organization_id,
+        user_id=user.user_id,
+        name=old_session.name + " (Fork)",
+        user_role=old_session.user_role,
+        mode=old_session.mode,
+    )
+    # Copy workspaces
+    workspace_data = [{"slug": ws.slug, "name": ws.name} for ws in old_session.workspaces]
+    workspace_rows = prepare_workspaces(workspace_data, user.tenant_id)
+    new_session.workspaces = [await get_or_create_workspace(db, user.tenant_id, data) for data in workspace_rows]
+    
+    db.add(new_session)
+    await db.flush() # get new_session.id
+    
+    # Get all messages up to the branch point
+    branch_msg_res = await db.execute(select(MessageModel).where(
+        MessageModel.id == req.message_id,
+        MessageModel.session_id == session_id,
+        MessageModel.tenant_id == user.tenant_id
+    ))
+    branch_msg = branch_msg_res.scalar_one_or_none()
+    
+    if branch_msg:
+        msgs_res = await db.execute(select(MessageModel).where(
+            MessageModel.session_id == session_id,
+            MessageModel.tenant_id == user.tenant_id,
+            MessageModel.sequence <= branch_msg.sequence
+        ).order_by(MessageModel.sequence.asc()))
+        
+        for old_msg in msgs_res.scalars().all():
+            new_msg = MessageModel(
+                tenant_id=user.tenant_id,
+                session_id=new_session.id,
+                task_id=old_msg.task_id,
+                role=old_msg.role,
+                content=old_msg.content,
+                tool_call_id=old_msg.tool_call_id,
+                tool_calls=old_msg.tool_calls,
+                extra_metadata=old_msg.extra_metadata,
+                sequence=old_msg.sequence
+            )
+            db.add(new_msg)
+            
+    await db.commit()
+    await db.refresh(new_session)
+    return session_to_dict(new_session)
 
 
 router.include_router(workspaces_router)

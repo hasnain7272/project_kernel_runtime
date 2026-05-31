@@ -40,7 +40,7 @@ export function DashboardHeader({
   const handleLogout = () => {
     localStorage.removeItem('auth_token');
     useSessionStore.getState().reset();
-    window.location.href = '/login';
+    window.location.href = '#/login';
   };
 
   return (
