@@ -82,9 +82,11 @@ export function useChatController() {
     const finalModels = [...merged, ...customConfigured];
     setModelOptions(finalModels);
     
-    // Set default active model if none is set or if the current activeModelId is not in options
-    if ((!activeModelId || !finalModels.some((m) => m.id === activeModelId)) && finalModels[0]?.id) {
-      setActiveModelId(finalModels[0].id);
+    // Set default active model: prefer a configured model over an unconfigured preset
+    if (!activeModelId || !finalModels.some((m) => m.id === activeModelId)) {
+      const firstConfigured = finalModels.find((m) => m.is_configured);
+      const fallback = firstConfigured || finalModels[0];
+      if (fallback?.id) setActiveModelId(fallback.id);
     }
   }, [activeModelId, setActiveModelId]);
 
@@ -222,6 +224,8 @@ export function useChatController() {
       }
       if (renderQueued) flushAssistant();
       setStreaming(false);
+      // Clear activity rail so stale items like "Analyzing..." don't persist
+      setActivity([]);
       // Finalize the streaming bubble
       setMsgs((p) => p.map((m) => m.streaming ? { ...m, streaming: false } : m));
       // Reload authoritative history from backend

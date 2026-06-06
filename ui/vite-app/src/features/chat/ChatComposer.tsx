@@ -39,13 +39,13 @@ export function ChatComposer({
   return (
     <form onSubmit={submit} className="rounded-3xl border border-slate-700/60 bg-slate-950/85 p-2 shadow-2xl shadow-black/20 ring-1 ring-slate-800/50 transition focus-within:border-cyan-500/50 focus-within:ring-cyan-500/20">
       <div className="flex items-center gap-2 border-b border-slate-800/60 px-2 pb-2">
-        <div className="relative">
+        <div className="relative min-w-0 flex-1 sm:flex-none">
           <Cpu className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-cyan-300" />
           <select
             value={activeModel?.id || ''}
             onChange={(event) => onModelSelect(event.target.value)}
             disabled={streaming || modelOptions.length === 0}
-            className="h-8 appearance-none rounded-xl border border-slate-700/70 bg-slate-900 pl-8 pr-8 text-xs font-semibold text-slate-100 outline-none transition hover:border-cyan-500/40 disabled:opacity-50"
+            className="h-8 w-full appearance-none rounded-xl border border-slate-700/70 bg-slate-900 pl-8 pr-8 text-xs font-semibold text-slate-100 outline-none transition hover:border-cyan-500/40 disabled:opacity-50 sm:w-auto"
             title={activeModel?.model || 'No model configured'}
           >
             {modelOptions.length === 0 && <option value="">No model configured</option>}
@@ -66,10 +66,10 @@ export function ChatComposer({
           </select>
           <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
         </div>
-        <div className="hidden min-w-0 flex-1 items-center gap-2 text-[10px] text-slate-500 sm:flex">
+        <div className="hidden min-w-0 flex-1 items-center gap-2 overflow-hidden text-[10px] text-slate-500 sm:flex">
           <span className="truncate font-mono">{activeModel?.model || 'Configure provider in settings'}</span>
           {activeModel?.provider === 'NVIDIA' && <span className="shrink-0 rounded-full bg-green-500/10 px-2 py-0.5 text-green-300">NVIDIA</span>}
-          {activeModel?.base_url && <span className="shrink-0 rounded-full bg-cyan-500/10 px-2 py-0.5 text-cyan-300">OpenAI-compatible</span>}
+          {activeModel?.base_url && <span className="shrink-0 rounded-full bg-cyan-500/10 px-2 py-0.5 text-cyan-300">OpenAI-compat</span>}
         </div>
         <button type="button" onClick={onToggleShadow} title="Shadow mode: simulate restricted actions" className={`flex h-8 shrink-0 items-center gap-1.5 rounded-xl px-2.5 text-[11px] font-semibold transition ${shadowMode ? 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/50' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
           <ShieldCheck className="h-3.5 w-3.5" />
@@ -77,7 +77,7 @@ export function ChatComposer({
         </button>
       </div>
       <div className="flex items-end gap-2 px-2 pt-2">
-        <textarea ref={inputRef} rows={1} value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={keyDown} placeholder="Ask, edit, build..." disabled={streaming} className="max-h-[140px] flex-1 resize-none bg-transparent py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 disabled:opacity-50" />
+        <textarea ref={inputRef} rows={1} value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={keyDown} placeholder="Ask the agent to inspect, edit, or run..." disabled={streaming} className="max-h-[140px] min-h-10 flex-1 resize-none bg-transparent py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 disabled:opacity-50" />
         <label className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-800 hover:text-slate-200" title="Attach file">
           <input type="file" className="hidden" onChange={onUpload} />
           <Paperclip className="h-4 w-4" />

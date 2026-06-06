@@ -64,8 +64,15 @@ class KubernetesSandboxExecutor:
             return f"sandbox-{session_hash}-{timestamp}-{unique}"
         return f"sandbox-{timestamp}-{unique}"
 
-    async def execute(self, config: SandboxConfig) -> SandboxResult:
+    async def execute(self, config: SandboxConfig | str = None, **kwargs) -> SandboxResult:
         """Execute command in sandboxed Kubernetes Job."""
+        if isinstance(config, str):
+            config = SandboxConfig(command=config, **kwargs)
+        elif config is None and "command" in kwargs:
+            config = SandboxConfig(command=kwargs.pop("command"), **kwargs)
+        elif not isinstance(config, SandboxConfig):
+            raise TypeError("Expected SandboxConfig or command string")
+
         await self._ensure_client()
 
         job_name = self._generate_job_name(config.session_id)

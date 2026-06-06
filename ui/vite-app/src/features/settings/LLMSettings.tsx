@@ -35,7 +35,7 @@ export function LLMSettings({ preset, setPreset, config, setConfig, existingKey,
       </label>
 
       <div className="mb-2 px-1 text-[10px] font-bold uppercase tracking-widest text-slate-600">NVIDIA hosted</div>
-      <div className="flex gap-1.5 mb-3 overflow-x-auto pb-1">
+      <div className="flex flex-wrap gap-1.5 mb-3">
         {PRESETS.filter(p => p.provider === 'NVIDIA').map(p => (
           <button key={p.id} onClick={() => handlePresetSelect(p)}
             className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition ${preset === p.id ? 'bg-slate-700/80 text-white ring-1 ring-slate-600' : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-300'}`}>
@@ -44,7 +44,7 @@ export function LLMSettings({ preset, setPreset, config, setConfig, existingKey,
         ))}
       </div>
       <div className="mb-2 px-1 text-[10px] font-bold uppercase tracking-widest text-slate-600">Other providers</div>
-      <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+      <div className="flex flex-wrap gap-1.5 mb-4">
         {PRESETS.filter(p => p.provider !== 'NVIDIA').map(p => (
           <button key={p.id} onClick={() => handlePresetSelect(p)}
             className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition ${preset === p.id ? 'bg-slate-700/80 text-white ring-1 ring-slate-600' : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-300'}`}>
@@ -81,21 +81,21 @@ export function LLMSettings({ preset, setPreset, config, setConfig, existingKey,
             placeholder="Defaults to provider auto-detection"
             className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          <div>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="min-w-0">
             <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">Temp</label>
             <input type="number" min="0" max="2" step="0.1" value={config.temperature ?? 0.2} onChange={e => handleConfigChange('temperature', e.target.value)}
-              className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
+              className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-2.5 py-2 text-sm text-slate-100 outline-none focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
           </div>
-          <div>
+          <div className="min-w-0">
             <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">Top P</label>
             <input type="number" min="0" max="1" step="0.05" value={config.top_p ?? 0.95} onChange={e => handleConfigChange('top_p', e.target.value)}
-              className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
+              className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-2.5 py-2 text-sm text-slate-100 outline-none focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
           </div>
-          <div>
-            <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">Max</label>
+          <div className="min-w-0">
+            <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">Max Tokens</label>
             <input type="number" min="256" max="32768" step="256" value={config.max_tokens ?? 8192} onChange={e => handleConfigChange('max_tokens', e.target.value)}
-              className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
+              className="w-full rounded-lg border border-slate-700/60 bg-slate-800/50 px-2.5 py-2 text-sm text-slate-100 outline-none focus:border-cyan-600/60 focus:ring-1 focus:ring-cyan-600/30 transition font-mono" />
           </div>
         </div>
       </div>

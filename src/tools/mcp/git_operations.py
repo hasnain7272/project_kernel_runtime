@@ -20,17 +20,26 @@ class GitCloneTool(BaseTool):
     async def execute(self, session_id: str, **kwargs) -> Dict[str, Any]:
         repo_url = kwargs.get("repo_url")
         branch = kwargs.get("branch", "main")
-        workspace = "/workspace/repos"
+        
+        from src.infrastructure.runtime.paths import resolve_workspace_path
+        try:
+            repos_dir = resolve_workspace_path("repos", session_id=session_id)
+            repos_dir.mkdir(parents=True, exist_ok=True)
+            workspace = str(repos_dir)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
         executor = await get_sandbox_executor()
-        command = f"mkdir -p {workspace} && cd {workspace} && git clone -b {branch} {repo_url} . 2>&1"
+        command = f"git clone -b {branch} {repo_url} ."
 
-        result = await executor.execute(command=command)
+        # Run with explicit working dir to avoid cd
+        result = await executor.execute(config={"command": command, "working_dir": workspace, "image": "alpine/git", "memory_limit": "512m", "timeout": 300})
+        
         return {
             "success": result.exit_code == 0,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "workspace": workspace,
+            "workspace": "repos",
             "branch": branch,
         }
 
@@ -46,22 +55,34 @@ class GitReadTool(BaseTool):
     requires_sandbox = True
 
     async def execute(self, session_id: str, **kwargs) -> Dict[str, Any]:
+        from src.infrastructure.runtime.paths import resolve_workspace_path
+        
         filepath = kwargs.get("filepath")
         limit = kwargs.get("limit", 500)
-        workspace = "/workspace/repos"
-        full_path = f"{workspace}/{filepath}"
-
-        from src.infrastructure.sandbox.kubernetes import execute_sandboxed
-        # Use cat + head for isolated reading
-        command = f"cat {full_path} | head -n {limit}"
         
+        # Use safe path resolution
         try:
-            result = await execute_sandboxed(command=command)
+            full_path = resolve_workspace_path(f"repos/{filepath}", session_id=session_id)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+        if not full_path.exists():
+            return {"success": False, "error": f"File not found: {filepath}"}
+
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = []
+                for i, line in enumerate(f):
+                    if i >= limit:
+                        break
+                    lines.append(line)
+            
+            content = "".join(lines)
             return {
-                "success": result.exit_code == 0,
-                "content": result.stdout,
+                "success": True,
+                "content": content,
                 "filepath": filepath,
-                "truncated": "Truncated by limit" if result.exit_code == 0 else "Error",
+                "truncated": "Truncated by limit" if len(lines) == limit else "Full file",
             }
         except Exception as e:
             return {"success": False, "error": str(e)}

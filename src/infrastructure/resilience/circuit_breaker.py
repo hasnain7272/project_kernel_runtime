@@ -222,7 +222,8 @@ class CircuitBreaker:
                 asyncio.run(self.record_failure(e))
                 raise
         
-        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+        import inspect
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
 
 
 class CircuitBreakerOpenError(Exception):

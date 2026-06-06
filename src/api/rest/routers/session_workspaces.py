@@ -34,12 +34,18 @@ async def add_workspace(
         if github_token and not github_token.startswith("gAAAA"):
             github_token = encrypt_string(github_token)
         gvfs = await get_gvfs()
-        await gvfs.mount_repository(
-            session_id=session_id,
-            repo_url=data["url"],
-            branch=data.get("branch") or "main",
-            auth_token=github_token,
-        )
+        try:
+            await gvfs.mount_repository(
+                session_id=session_id,
+                repo_url=data["url"],
+                branch=data.get("branch") or "main",
+                auth_token=github_token,
+            )
+        except RuntimeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to clone repository: {e}"
+            )
 
     session.last_active_at = datetime.now(timezone.utc)
     await db.commit()

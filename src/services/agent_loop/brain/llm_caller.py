@@ -102,26 +102,36 @@ async def call_llm_and_stream(
     model_label = llm_config["model"].split("/")[-1]
     await broker.publish(f"task_log:{task_id}", f"\x1b[38;5;46m[{model_label}] Thinking...\x1b[0m\r\n".encode("utf-8"))
 
-    async for chunk in response:
-        choices = getattr(chunk, "choices", None) or []
-        if not choices or getattr(choices[0], "delta", None) is None:
-            continue
-        delta = choices[0].delta
-        if getattr(delta, "reasoning_content", None):
-            await broker.publish(f"task_log:{task_id}", {"event": "reasoning", "text": delta.reasoning_content})
-        if delta.content:
-            collected_content.append(delta.content)
-            await broker.publish(f"task_log:{task_id}", {"event": "token", "text": delta.content})
-        if delta.tool_calls:
-            for tc in delta.tool_calls:
-                idx = tc.index
-                if idx not in tool_calls_dict:
-                    tool_calls_dict[idx] = {"id": tc.id, "type": tc.type, "function": {"name": "", "arguments": ""}}
-                if tc.function:
-                    if tc.function.name:
-                        tool_calls_dict[idx]["function"]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+    try:
+        async for chunk in response:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices or getattr(choices[0], "delta", None) is None:
+                continue
+            delta = choices[0].delta
+            if getattr(delta, "reasoning_content", None):
+                await broker.publish(f"task_log:{task_id}", {"event": "reasoning", "text": delta.reasoning_content})
+            if delta.content:
+                collected_content.append(delta.content)
+                await broker.publish(f"task_log:{task_id}", {"event": "token", "text": delta.content})
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_dict:
+                        tool_calls_dict[idx] = {"id": tc.id, "type": tc.type, "function": {"name": "", "arguments": ""}}
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_dict[idx]["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
 
-    from src.services.agent_loop.brain.response_parser import process_response
-    await process_response(db, session_id, tenant_id, task_id, trace_id, collected_content, tool_calls_dict)
+        from src.services.agent_loop.brain.response_parser import process_response
+        await process_response(db, session_id, tenant_id, task_id, trace_id, collected_content, tool_calls_dict)
+
+    except Exception as stream_err:
+        error_text = str(stream_err)
+        human_msg = f"⚠️ LLM Streaming Error: {error_text[:500]}"
+        await broker.publish(f"task_log:{task_id}", f"\r\n\x1b[38;5;196m{human_msg}\x1b[0m\r\n".encode("utf-8"))
+        await persist_message(db, session_id, "assistant", human_msg, task_id=task_id)
+        await broker.publish(f"task_log:{task_id}", {"event_type": "TASK_RESOLVED"})
+        await db.commit()
+        return

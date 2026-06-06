@@ -26,7 +26,7 @@ export function ChatPane() {
 
   return (
     <div className="flex h-full flex-col bg-slate-950/20">
-      <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8 lg:px-14 xl:px-20">
+      <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-4 md:px-8 lg:px-14 xl:px-20">
         {chat.msgs.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
             <div className="rounded-2xl bg-cyan-500/10 p-5 ring-1 ring-cyan-400/20">
@@ -53,7 +53,7 @@ export function ChatPane() {
         )}
         <div ref={endRef} />
       </div>
-      <div className="border-t border-slate-800/60 bg-slate-900/40 px-4 py-3 md:px-8 lg:px-14 xl:px-20">
+      <div className="border-t border-slate-800/60 bg-slate-900/50 px-2.5 py-2.5 sm:px-4 md:px-8 lg:px-14 xl:px-20">
         <div className="mx-auto max-w-3xl">
           <ChatComposer
             input={chat.input}

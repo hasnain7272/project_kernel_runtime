@@ -22,8 +22,8 @@ def _default_workspace_root() -> Path:
 APP_VERSION = "4.0.0-PROD"
 WORKSPACE_ROOT = _default_workspace_root()
 
-# Security: Strictly disable local execution for SaaS isolation.
-ALLOW_ANON_LOCAL = False
+# Security: Allow local dev execution if not explicitly running in production
+ALLOW_ANON_LOCAL = _flag("ALLOW_ANON_LOCAL", os.environ.get("ENVIRONMENT") != "production")
 
 # Sandbox: Enforce Docker microVMs for zero leakage.
 SANDBOX_MODE = "docker"

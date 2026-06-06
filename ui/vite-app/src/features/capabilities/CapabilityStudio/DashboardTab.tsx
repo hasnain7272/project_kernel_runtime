@@ -3,10 +3,7 @@ import { Activity, Plug, CheckCircle, AlertTriangle, TrendingUp, Clock, X } from
 import type { DashboardResponse } from './types';
 import { apiClient } from '@/api/client';
 
-interface Props {
-  dashboard: DashboardResponse | null;
-  onDashboardChanged: () => void;
-}
+interface Props { dashboard: DashboardResponse | null; onDashboardChanged: () => void; }
 
 function StatusBadge({ status }: { status: string }) {
   const config: Record<string, { color: string; bg: string; icon: typeof CheckCircle }> = {
@@ -24,7 +21,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function MetricCard({ label, value, subvalue, icon: Icon, color }: { label: string; value: string | number; subvalue?: string; icon: typeof TrendingUp; color: string }) {
+function MetricCard({ label, value, subvalue, icon: Icon, color }: { label: string; value: string | number; subvalue?: string; icon: typeof TrendingUp; color: string; }) {
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
       <div className="flex items-center gap-2">
@@ -60,34 +57,10 @@ export function DashboardTab({ dashboard, onDashboardChanged }: Props) {
   return (
     <div className="space-y-6">
       <div className="grid gap-4 lg:grid-cols-4">
-        <MetricCard
-          label="Total Plugins"
-          value={dashboard.total_count}
-          subvalue="registered"
-          icon={Plug}
-          color="bg-violet-500/10 text-violet-400"
-        />
-        <MetricCard
-          label="Healthy"
-          value={dashboard.healthy_count}
-          subvalue="active"
-          icon={CheckCircle}
-          color="bg-emerald-500/10 text-emerald-400"
-        />
-        <MetricCard
-          label="Circuit Open"
-          value={dashboard.circuit_open_count}
-          subvalue="degraded"
-          icon={AlertTriangle}
-          color="bg-amber-500/10 text-amber-400"
-        />
-        <MetricCard
-          label="Total Calls"
-          value={dashboard.plugins.reduce((acc, p) => acc + p.total_calls, 0)}
-          subvalue="all time"
-          icon={TrendingUp}
-          color="bg-cyan-500/10 text-cyan-400"
-        />
+        <MetricCard label="Total Plugins" value={dashboard.total_count} subvalue="registered" icon={Plug} color="bg-violet-500/10 text-violet-400" />
+        <MetricCard label="Healthy" value={dashboard.healthy_count} subvalue="active" icon={CheckCircle} color="bg-emerald-500/10 text-emerald-400" />
+        <MetricCard label="Circuit Open" value={dashboard.circuit_open_count} subvalue="degraded" icon={AlertTriangle} color="bg-amber-500/10 text-amber-400" />
+        <MetricCard label="Total Calls" value={dashboard.plugins.reduce((acc, p) => acc + p.total_calls, 0)} subvalue="all time" icon={TrendingUp} color="bg-cyan-500/10 text-cyan-400" />
       </div>
 
       {dashboard.plugins.length === 0 ? (
@@ -108,9 +81,7 @@ export function DashboardTab({ dashboard, onDashboardChanged }: Props) {
                     <span className="text-sm font-semibold text-slate-100">{plugin.name}</span>
                     <StatusBadge status={plugin.status} />
                   </div>
-                  {plugin.endpoint_url && (
-                    <p className="mt-1 text-[11px] text-slate-500">{plugin.endpoint_url}</p>
-                  )}
+                  {plugin.endpoint_url && <p className="mt-1 text-[11px] text-slate-500">{plugin.endpoint_url}</p>}
                   <p className="mt-2 text-sm text-slate-400">{plugin.description}</p>
 
                   <div className="mt-4 grid grid-cols-4 gap-4">
@@ -147,11 +118,7 @@ export function DashboardTab({ dashboard, onDashboardChanged }: Props) {
           ))}
         </div>
       )}
-      {message && (
-        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-slate-400">
-          {message}
-        </div>
-      )}
+      {message && <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-slate-400">{message}</div>}
     </div>
   );
 }

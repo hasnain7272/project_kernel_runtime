@@ -23,8 +23,15 @@ class LocalSandboxExecutor:
     def __init__(self):
         self._use_docker = os.environ.get("USE_DOCKER_SANDBOX", "false").lower() == "true"
 
-    async def execute(self, config: SandboxConfig) -> SandboxResult:
+    async def execute(self, config: SandboxConfig | str = None, **kwargs) -> SandboxResult:
         """Execute in local subprocess (limited security)."""
+        if isinstance(config, str):
+            config = SandboxConfig(command=config, **kwargs)
+        elif config is None and "command" in kwargs:
+            config = SandboxConfig(command=kwargs.pop("command"), **kwargs)
+        elif not isinstance(config, SandboxConfig):
+            raise TypeError("Expected SandboxConfig or command string")
+
         start_time = time.time()
         job_name = f"local-{uuid.uuid4().hex[:8]}"
 
@@ -43,7 +50,10 @@ class LocalSandboxExecutor:
         else:
             # Direct subprocess (VERY LIMITED SECURITY - dev only)
             logger.warning("[LocalSandbox] Using direct subprocess - NO SECURITY ISOLATION")
-            cmd = ["/bin/sh", "-c", config.command]
+            if os.name == "nt":
+                cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", config.command]
+            else:
+                cmd = ["/bin/sh", "-c", config.command]
 
         try:
             proc = await asyncio.create_subprocess_exec(

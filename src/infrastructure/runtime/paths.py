@@ -10,8 +10,15 @@ def workspace_root() -> Path:
 
 
 def get_session_root(tenant_id: str, session_id: str) -> Path:
-    """Get the root storage directory for a session."""
-    return workspace_root() / f"tenant_{tenant_id}" / f"session_{session_id}"
+    """Get the root storage directory for a session.
+    
+    Uses shortened IDs (first 8 chars) to avoid Windows MAX_PATH (260 char)
+    limits — Git's internal .git/objects paths add ~50+ chars on top of the
+    clone destination, so we must keep the base path well under 200 chars.
+    """
+    short_tenant = tenant_id[:8] if len(tenant_id) > 8 else tenant_id
+    short_session = session_id[:8] if len(session_id) > 8 else session_id
+    return workspace_root() / f"t_{short_tenant}" / f"s_{short_session}"
 
 
 def resolve_workspace_path(

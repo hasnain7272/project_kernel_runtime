@@ -56,11 +56,19 @@ async def load_session_llm_config(db: AsyncSession, session_id: str, session: An
                             found_in_byom = True
                             break
                 
-                # If requested model wasn't found in BYOM config but we have BYOM configs,
-                # we only default to the first BYOM config if no requested model was specified
-                if not found_in_byom and not requested_model_id:
-                    selected = byom_configs[0]
-                    found_in_byom = True
+                # If requested model wasn't found in BYOM config, fall back to:
+                # 1. The first BYOM config (if no specific model requested)
+                # 2. Any BYOM config with an API key (if requested model wasn't in BYOM)
+                if not found_in_byom:
+                    if not requested_model_id:
+                        selected = byom_configs[0]
+                        found_in_byom = True
+                    else:
+                        # Requested model isn't in BYOM — try to find any config with a key
+                        keyed = [b for b in byom_configs if b.get("api_key")]
+                        if keyed:
+                            selected = keyed[0]
+                            found_in_byom = True
                     
                 if selected:
                     api_key = _resolve_secret(selected.get("api_key", ""))
@@ -79,6 +87,7 @@ async def load_session_llm_config(db: AsyncSession, session_id: str, session: An
             "nvidia-qwen-coder": {"model": "qwen/qwen3-coder-480b-a35b-instruct", "base_url": "https://integrate.api.nvidia.com/v1", "key_env": "NVIDIA_API_KEY"},
             "openai": {"model": "gpt-4o", "base_url": None, "key_env": "OPENAI_API_KEY"},
             "anthropic": {"model": "claude-sonnet-4-20250514", "base_url": None, "key_env": "ANTHROPIC_API_KEY"},
+            "gemini": {"model": "gemini/gemini-2.5-pro", "base_url": None, "key_env": "GEMINI_API_KEY"},
             "ollama": {"model": "ollama/llama3.3", "base_url": "http://localhost:11434", "key_env": None},
         }
         preset = PRESET_DEFAULTS.get(requested_model_id)

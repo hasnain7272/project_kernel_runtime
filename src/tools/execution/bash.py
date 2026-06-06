@@ -100,7 +100,7 @@ class BashExecuteTool(BaseTool):
 
         # Use proper shell invocation — this allows pipes, redirects, variables
         if os.name == "nt":
-            shell_cmd = ["cmd", "/c", command]
+            shell_cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", command]
         else:
             shell_cmd = ["/bin/sh", "-c", command]
 
